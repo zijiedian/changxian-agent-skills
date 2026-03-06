@@ -72,7 +72,7 @@ from constants import (
 )
 from memory_store import MemoryRecord, MemoryStore
 from scheduler import ScheduledJob, SchedulerService, SchedulerStore, parse_schedule_spec
-from settings import Settings, resource_base_dir, runtime_base_dir
+from settings import Settings, ensure_state_base_dir, resource_base_dir, runtime_base_dir
 
 
 @dataclass
@@ -185,16 +185,17 @@ class Bridge:
         self.codex_prefix = settings.codex_command_prefix
         self.recent_requests: Dict[tuple[int, int], float] = {}
         self.auth_sessions: Dict[tuple[int, int], float] = {}
-        base_dir = runtime_base_dir()
-        self.media_dir = base_dir / "incoming_media"
-        self.output_dir = base_dir / "outputs"
-        self.roles_dir = base_dir / "roles"
-        self.env_path = base_dir / ".env"
-        self.sessions_path = base_dir / "chat_sessions.json"
-        self.workdirs_path = base_dir / "chat_workdirs.json"
-        self.roles_path = base_dir / "chat_roles.json"
-        self.page_sessions_path = base_dir / "page_sessions.json"
-        self.state_db_path = base_dir / "agent_state.sqlite3"
+        runtime_dir = runtime_base_dir()
+        state_dir = ensure_state_base_dir()
+        self.media_dir = runtime_dir / "incoming_media"
+        self.output_dir = runtime_dir / "outputs"
+        self.roles_dir = state_dir / "roles"
+        self.env_path = state_dir / ".env"
+        self.sessions_path = state_dir / "chat_sessions.json"
+        self.workdirs_path = state_dir / "chat_workdirs.json"
+        self.roles_path = state_dir / "chat_roles.json"
+        self.page_sessions_path = state_dir / "page_sessions.json"
+        self.state_db_path = state_dir / "agent_state.sqlite3"
         self.resource_dir = resource_base_dir()
         self.project_skills_dir = self.resource_dir / "changxian-agent-skills"
         self._ensure_default_roles()
@@ -1190,7 +1191,18 @@ class Bridge:
         updated = 0
         deleted = 0
         pinned = 0
-        ignored = 0
+        change_details: list[str] = []
+
+        def _memory_label(record: Optional[MemoryRecord] = None, *, title: str = "", content: str = "") -> str:
+            raw_title = title.strip()
+            raw_content = content.strip()
+            if record is not None:
+                raw_title = record.title.strip()
+                raw_content = record.content.strip()
+            label = raw_title or (raw_content.splitlines()[0].strip() if raw_content else "")
+            if not label:
+                label = "untitled"
+            return self._truncate_text(label, limit=64)
 
         for op in operations:
             action = str(op.get("op") or op.get("action") or "").strip().lower()
@@ -1200,7 +1212,6 @@ class Bridge:
             if action in {"upsert", "add", "remember"}:
                 content = str(op.get("content") or "").strip()
                 if not content:
-                    ignored += 1
                     continue
                 title = str(op.get("title") or "").strip() or self._truncate_text(content.splitlines()[0].strip(), limit=72)
                 kind = str(op.get("kind") or "note").strip() or "note"
@@ -1217,7 +1228,7 @@ class Bridge:
                 pinned_flag = bool(op.get("pinned", False))
 
                 if target is None:
-                    self.memory_store.add_memory(
+                    created = self.memory_store.add_memory(
                         chat_id=request.chat_id,
                         scope=scope,
                         kind=kind,
@@ -1230,50 +1241,81 @@ class Bridge:
                         source_ref=request.session_ref or request.source,
                     )
                     added += 1
+                    change_details.append(f"added {created.id} ({_memory_label(created)})")
                     continue
 
                 merged_tags = list(target.tags)
                 for tag in tags:
                     if tag not in merged_tags:
                         merged_tags.append(tag)
+
+                next_scope = scope
+                next_kind = kind
+                next_title = title
+                next_content = content
+                next_tags = merged_tags
+                next_importance = max(target.importance, importance)
+                next_pinned = target.pinned or pinned_flag
+                changed_fields: list[str] = []
+                if target.scope != next_scope:
+                    changed_fields.append("scope")
+                if target.kind != next_kind:
+                    changed_fields.append("kind")
+                if target.title != next_title:
+                    changed_fields.append("title")
+                if target.content != next_content:
+                    changed_fields.append("content")
+                if target.tags != next_tags:
+                    changed_fields.append("tags")
+                if target.importance != next_importance:
+                    changed_fields.append("importance")
+                if target.pinned != next_pinned:
+                    changed_fields.append("pinned")
+                if not changed_fields:
+                    continue
+
                 self.memory_store.update_memory(
                     request.chat_id,
                     target.id,
-                    scope=scope,
-                    kind=kind,
-                    title=title,
-                    content=content,
-                    tags=merged_tags,
-                    importance=max(target.importance, importance),
-                    pinned=target.pinned or pinned_flag,
+                    scope=next_scope,
+                    kind=next_kind,
+                    title=next_title,
+                    content=next_content,
+                    tags=next_tags,
+                    importance=next_importance,
+                    pinned=next_pinned,
                     source_type=f"skill:{MEMORY_SKILL_NAME}",
                     source_ref=request.session_ref or request.source,
                 )
                 updated += 1
+                field_list = ", ".join(changed_fields[:6])
+                if len(changed_fields) > 6:
+                    field_list += ", ..."
+                change_details.append(f"updated {target.id} ({_memory_label(title=next_title, content=next_content)}): {field_list}")
                 continue
 
             if action in {"delete", "forget", "remove"}:
                 if target is None:
-                    ignored += 1
                     continue
                 if self.memory_store.delete_memory(request.chat_id, target.id):
                     deleted += 1
-                else:
-                    ignored += 1
+                    change_details.append(f"deleted {target.id} ({_memory_label(target)})")
                 continue
 
             if action in {"pin", "unpin"}:
                 if target is None:
-                    ignored += 1
                     continue
                 should_pin = action == "pin"
+                if target.pinned == should_pin:
+                    continue
                 if self.memory_store.set_pinned(request.chat_id, target.id, pinned=should_pin):
                     pinned += 1
-                else:
-                    ignored += 1
+                    verb = "pinned" if should_pin else "unpinned"
+                    change_details.append(f"{verb} {target.id} ({_memory_label(target)})")
                 continue
 
-            ignored += 1
+        if not change_details:
+            return ""
 
         parts: list[str] = []
         if added:
@@ -1284,9 +1326,14 @@ class Bridge:
             parts.append(f"deleted {deleted}")
         if pinned:
             parts.append(f"pin changes {pinned}")
-        if ignored:
-            parts.append(f"ignored {ignored}")
-        return ", ".join(parts)
+
+        lines = [", ".join(parts) if parts else f"changed {len(change_details)}"]
+        preview_count = min(6, len(change_details))
+        for detail in change_details[:preview_count]:
+            lines.append(f"- {detail}")
+        if len(change_details) > preview_count:
+            lines.append(f"- and {len(change_details) - preview_count} more changes")
+        return "\n".join(lines)
 
     def _auto_save_execution_memory(self, request: ExecutionRequest, cleaned_output: str) -> None:
         if not self.settings.enable_memory or not self.settings.memory_auto_save:
@@ -1432,7 +1479,7 @@ class Bridge:
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Accept": "application/json",
-                    "User-Agent": "tg-codex",
+                    "User-Agent": "remote-control",
                 },
                 method="POST",
             )
@@ -2711,7 +2758,7 @@ class Bridge:
         commands_markup = "\n".join(start_help_lines())
         await self.send_html(
             update,
-            "<b>tg-codex</b>\n"
+            "<b>remote-control</b>\n"
             "Send plain text directly to execute a task.\n\n"
             "Send an image (optional caption) to run an image prompt.\n\n"
             "<b>Commands</b>\n"
@@ -3539,7 +3586,7 @@ class Bridge:
                     "<code>/schedule add once 2026-03-07 09:30 | &lt;prompt&gt;</code>",
                     "<code>/schedule add cron 0 9 * * * | &lt;prompt&gt;</code>",
                     "<code>/schedule set &lt;job_id&gt; role | reviewer</code>",
-                    "<code>/schedule set &lt;job_id&gt; memory_scope | project:tg-codex</code>",
+                    "<code>/schedule set &lt;job_id&gt; memory_scope | project:remote-control</code>",
                     "<code>/schedule set &lt;job_id&gt; session_policy | fresh</code>",
                     "<code>/schedule run &lt;job_id&gt;</code>",
                     "<code>/schedule pause &lt;job_id&gt;</code>",
@@ -3647,7 +3694,7 @@ class Bridge:
                     update,
                     "<b>Usage</b>\n"
                     "<code>/schedule set &lt;job_id&gt; role | reviewer</code>\n"
-                    "<code>/schedule set &lt;job_id&gt; memory_scope | project:tg-codex</code>\n"
+                    "<code>/schedule set &lt;job_id&gt; memory_scope | project:remote-control</code>\n"
                     "<code>/schedule set &lt;job_id&gt; session_policy | fresh</code>",
                 )
                 return

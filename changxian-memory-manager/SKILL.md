@@ -37,6 +37,9 @@ Do not store:
 - Prefer updating or merging an existing memory instead of creating duplicates.
 - When the user explicitly replaces an old preference, update or delete the stale memory.
 - If no memory change is needed, emit no memory-ops block.
+- Avoid no-op operations that only repeat existing memory values.
+- Do not add routine "memory reminder" prose in normal replies.
+- When memory really changes, explain the concrete change points briefly (added/updated/deleted/pinned item).
 - Keep normal user-facing prose separate from memory operations.
 
 ## Output Protocol
@@ -46,6 +49,8 @@ When memory should change, append exactly one fenced block at the very end of th
 ```tg-memory-ops
 {"ops":[...]}
 ```
+
+Storage note: this skill emits memory operations only. The host bridge consumes `tg-memory-ops` and persists memory to its state store (for changxian remote control, this is `agent_state.sqlite3`).
 
 Supported operations:
 

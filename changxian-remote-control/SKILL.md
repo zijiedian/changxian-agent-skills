@@ -44,6 +44,7 @@ Do not assume every host supports every capability. Adapt to the active host con
 - Favor incremental updates over long monologues when the host streams progress.
 - Keep final handoff messages scannable and action-oriented.
 - If the host exposes scheduling, suggest it for repeated or delayed work.
+- Avoid repetitive memory/role reminders; only mention them when a real state change is needed.
 
 ## Scheduling Guidance
 
@@ -81,7 +82,13 @@ This skill also includes a standalone reference Telegram bridge runtime plus ven
 Use:
 
 - `scripts/install_reference_telegram_bridge.py` to install the bundled runtime
-- `references/standalone-install.md` for the standalone layout and usage
+- `references/standalone-install.md` for the standalone layout, one-command install flow, and Windows usage
+
+The installed runtime exposes:
+
+- `start.py` as the cross-platform launcher
+- `start.sh` for macOS / Linux
+- `start.ps1` and `start.cmd` for Windows
 
 The bundled standalone package includes:
 

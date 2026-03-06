@@ -11,11 +11,34 @@
   - `changxian-remote-control`
 - `scripts/install_reference_telegram_bridge.py` - installs the standalone bridge into a target directory
 
-## Install
+## Fastest Path
+
+macOS / Linux:
 
 ```bash
-python scripts/install_reference_telegram_bridge.py --path ~/changxian-telegram-bridge
+python3 scripts/install_reference_telegram_bridge.py --path ~/changxian-telegram-bridge --token <TG_BOT_TOKEN> --run
 ```
+
+Windows（PowerShell）：
+
+```powershell
+py .\scripts\install_reference_telegram_bridge.py --path $HOME\changxian-telegram-bridge --token <TG_BOT_TOKEN> --run
+```
+
+This will:
+
+- copy the bridge runtime and bundled skills
+- create `.env` from the template
+- prefill `TG_BOT_TOKEN` when provided
+- start via `start.py`, which reuses an existing binary or falls back to Python mode
+- persist memory/role/session state under `$CODEX_HOME/changxian-agent/remote-control` (or `~/.codex/changxian-agent/remote-control`)
+
+## Manual Start After Install
+
+- macOS / Linux: `./start.sh --token <TG_BOT_TOKEN> --port 18000`
+- Windows（PowerShell）: `.\start.ps1 -Token <TG_BOT_TOKEN> -Port 18000`
+- Windows（cmd）: `start.cmd --token <TG_BOT_TOKEN> --port 18000`
+- Cross-platform: `python start.py --token <TG_BOT_TOKEN> --port 18000`
 
 ## Result
 
@@ -24,4 +47,4 @@ The installer creates a target directory containing:
 - the bridge runtime files
 - a `changxian-agent-skills/` folder next to the bridge
 
-This layout allows the copied bridge to run without depending on the original `tg-codex` repository.
+This layout allows the copied bridge to run without depending on the original remote-control repository.

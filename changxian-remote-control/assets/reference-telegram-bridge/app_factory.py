@@ -94,7 +94,7 @@ def build_app(settings: Settings) -> tuple[FastAPI, Optional[Application]]:
             await telegram_app.shutdown()
             app_state["telegram_app"] = None
 
-    fastapi_app = FastAPI(title="tg-codex", lifespan=lifespan)
+    fastapi_app = FastAPI(title="remote-control", lifespan=lifespan)
 
     @fastapi_app.get("/healthz")
     async def healthz() -> dict:

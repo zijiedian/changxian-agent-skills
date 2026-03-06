@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,19 @@ class Settings:
     auth_ttl_seconds: int
 
 
+LEGACY_STATE_ENTRIES = (
+    ".env",
+    "agent_state.sqlite3",
+    "agent_state.sqlite3-shm",
+    "agent_state.sqlite3-wal",
+    "chat_roles.json",
+    "chat_sessions.json",
+    "chat_workdirs.json",
+    "page_sessions.json",
+    "roles",
+)
+
+
 def _parse_allowed_ids(value: str) -> Set[int]:
     if not value.strip():
         return set()
@@ -81,6 +95,50 @@ def runtime_base_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def codex_home_dir() -> Path:
+    configured = os.getenv("CODEX_HOME", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".codex"
+
+
+def state_base_dir() -> Path:
+    configured = os.getenv("TG_STATE_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return codex_home_dir() / "changxian-agent" / "remote-control"
+
+
+def _copy_if_missing(src: Path, dst: Path) -> None:
+    if dst.exists() or not src.exists():
+        return
+    if src.is_dir():
+        shutil.copytree(src, dst)
+    else:
+        shutil.copy2(src, dst)
+
+
+def ensure_state_base_dir() -> Path:
+    state_dir = state_base_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # One-time migration: preserve existing state from the legacy runtime directory.
+    legacy_dir = runtime_base_dir()
+    if legacy_dir != state_dir:
+        for name in LEGACY_STATE_ENTRIES:
+            src = legacy_dir / name
+            dst = state_dir / name
+            try:
+                _copy_if_missing(src, dst)
+            except OSError:
+                continue
+    return state_dir
+
+
+def state_env_path() -> Path:
+    return ensure_state_base_dir() / ".env"
+
+
 def resource_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         bundle_dir = getattr(sys, "_MEIPASS", "")
@@ -90,7 +148,7 @@ def resource_base_dir() -> Path:
 
 
 def load_settings() -> Settings:
-    env_path = runtime_base_dir() / ".env"
+    env_path = state_env_path()
     load_dotenv(env_path)
     if env_path.exists():
         try:

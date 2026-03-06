@@ -1,6 +1,6 @@
 # changxian-agent-skills
 
-This repository contains the packaged Codex skills used by `changxian-agent` / `tg-codex`.
+This repository contains the packaged Codex skills used by `changxian-agent` / `remote-control`.
 
 ## Included Skills
 

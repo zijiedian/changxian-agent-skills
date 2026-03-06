@@ -1,8 +1,38 @@
-# tg-codex
+# remote-control bridge
 
-`tg-codex` 是一个 Telegram -> Codex CLI 的桥接服务（FastAPI + python-telegram-bot）。
+`remote-control bridge` 是一个 Telegram -> Codex CLI 的桥接服务（FastAPI + python-telegram-bot）。
 
-> ⚠️ 安全建议：`tg-codex` 常用于高权限执行（如 `danger-full-access`），生产环境建议仅私聊使用，不建议加入群组。
+> ⚠️ 安全建议：`remote-control bridge` 常用于高权限执行（如 `danger-full-access`），生产环境建议仅私聊使用，不建议加入群组。
+
+## 30 秒快速启动（推荐）
+
+先在 Telegram 里给 bot 发一次 `/start`，再任选一个入口：
+
+通用入口（源码 bundle / 跨平台）：
+
+```bash
+python start.py --token <TG_BOT_TOKEN> --port 18000
+```
+
+macOS / Linux：
+
+```bash
+./start.sh --token <TG_BOT_TOKEN> --port 18000
+```
+
+Windows（PowerShell）：
+
+```powershell
+.\start.ps1 -Token <TG_BOT_TOKEN> -Port 18000
+```
+
+Windows（cmd）：
+
+```bat
+start.cmd --token <TG_BOT_TOKEN> --port 18000
+```
+
+`start.py` 会优先复用已有的桥接可执行文件（`.exe`）；如果当前目录还没有可执行文件，它会自动创建 `.venv`、安装运行时依赖，然后直接进入 Python 模式启动，不再先卡在 PyInstaller 构建。
 
 ## Telegram 创建 Bot 流程（首次必做）
 
@@ -41,19 +71,9 @@ cmd - 查看/设置命令前缀
 setting - 查看/修改设置
 ```
 
-### 3) 激活会话并启动 tg-codex
+### 3) 激活会话并启动 remote-control bridge
 
-先给你的 bot 私聊发送一次 `/start`（或任意消息），再启动：
-
-```bash
-./tg-codex --token <TG_BOT_TOKEN> --port 18000
-```
-
-或在仓库里：
-
-```bash
-./start.sh --token <TG_BOT_TOKEN>
-```
+先给你的 bot 私聊发送一次 `/start`（或任意消息），再执行上面的任一启动命令。
 
 首次启动会自动：
 
@@ -90,36 +110,32 @@ setting - 查看/修改设置
 - 更换或泄露 token：去 `@BotFather` 执行 `/revoke` 后更新 `.env`
 - 群组 chat id 通常是负数（正常）
 
-## 二进制优先：3 分钟启动（推荐）
+## 可执行文件优先：3 分钟启动（推荐）
 
 ### 1) 下载二进制
 
-到 Release 页面下载你系统对应的包：
+到你自己的发布页面下载系统对应的包（命名可按团队规范）：
 
-- `tg-codex-linux-*.tar.gz`
-- `tg-codex-macos-*.tar.gz`
-- `tg-codex-windows-*.zip`
-
-Release 页面：
-
-- https://github.com/zijiedian/tg-codex/releases
+- `remote-control-linux-*.tar.gz`
+- `remote-control-macos-*.tar.gz`
+- `remote-control-windows-*.zip`
 
 ### 2) 一行命令直接启动
 
 macOS / Linux：
 
 ```bash
-tar -xzf tg-codex-<os>-<arch>.tar.gz
+tar -xzf remote-control-<os>-<arch>.tar.gz
 cd <解压目录>
-./tg-codex --token <TG_BOT_TOKEN> --port 18000
+./remote-control --token <TG_BOT_TOKEN> --port 18000
 ```
 
 Windows（PowerShell）：
 
 ```powershell
-Expand-Archive .\tg-codex-windows-<arch>.zip -DestinationPath .\tg-codex
-cd .\tg-codex
-.\tg-codex.exe --token <TG_BOT_TOKEN> --port 18000
+Expand-Archive .\remote-control-windows-<arch>.zip -DestinationPath .\remote-control
+cd .\remote-control
+.\remote-control.exe --token <TG_BOT_TOKEN> --port 18000
 ```
 
 这条命令会自动做三件事：
@@ -134,7 +150,7 @@ cd .\tg-codex
 后续再次启动（无需再传 token）：
 
 ```bash
-./tg-codex --port 18000
+./remote-control --port 18000
 ```
 
 ---
@@ -150,37 +166,40 @@ cd .\tg-codex
 - 支持 `/cwd` 切换执行目录（按 chat 独立保存）
 - 可选上传完整输出文件 `codex-output-*.txt`（默认关闭，开启后仅长输出上传）
 
-## 一键本地构建并运行（二进制）
+## 源码仓库：统一启动入口（推荐）
 
-如果你是项目维护者，直接在仓库里执行：
+统一入口：
 
 ```bash
-./start.sh --token <TG_BOT_TOKEN>
+python start.py --token <TG_BOT_TOKEN> --port 18000
 ```
+
+快捷包装器：
+
+- macOS / Linux：`./start.sh --token <TG_BOT_TOKEN> --port 18000`
+- Windows PowerShell：`.\start.ps1 -Token <TG_BOT_TOKEN> -Port 18000`
+- Windows cmd：`start.cmd --token <TG_BOT_TOKEN> --port 18000`
 
 行为：
 
-1. 若传入 `--token`，自动写入 token 并回填 chat/user id
-2. 若 `dist/tg-codex` 不存在，自动调用 `./build_binary.sh` 构建
-3. 直接启动服务（统一入口：`start.sh`）
+1. 若存在桥接可执行文件，优先直接启动
+2. 若不存在，自动创建 `.venv` 并安装 `requirements.txt`，直接用 Python 模式启动
+3. `--reload` 总是强制使用 Python 模式
+4. 只有需要发布二进制时，才需要执行 `./build_binary.sh`
 
 开发调试（代码修改自动重启）：
 
 ```bash
-./start.sh --reload --token <TG_BOT_TOKEN>
+python start.py --reload --token <TG_BOT_TOKEN>
 ```
 
-`--reload` 会自动切换为 Python 模式（`cli.py`）运行，不走二进制。
-
-单独构建命令：
+可选二进制构建（维护者）：
 
 ```bash
 ./build_binary.sh
 ```
 
-产物：
-
-- `dist/tg-codex`
+Windows 从源码运行推荐直接用 `start.ps1` / `start.cmd`；如需 `.exe`，优先下载 release 包。
 
 ## 自动化发布（GitHub Actions）
 
@@ -205,7 +224,9 @@ git push origin v1.0.0
 - 自动打包归档并生成 `SHA256SUMS.txt`
 - 自动创建 GitHub Release 并上传可下载资产
 
-## Python 模式（备用）
+## Python 模式（手动兜底）
+
+通常不需要手动执行下面这套流程，`start.py` / `start.sh` / `start.ps1` 会自动处理 `.venv` 与运行时依赖。
 
 ```bash
 cp .env.example .env
@@ -230,7 +251,7 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `/schedule add once 2026-03-07 09:30 | <prompt>`
 - `/schedule add cron 0 9 * * * | <prompt>`
 - `/schedule set <job_id> role | reviewer`
-- `/schedule set <job_id> memory_scope | project:tg-codex`
+- `/schedule set <job_id> memory_scope | project:remote-control`
 - `/schedule set <job_id> session_policy | fresh`
 - `/schedule run <job_id>` / `/schedule pause <job_id>` / `/schedule resume <job_id>` / `/schedule rm <job_id>`
 - `/status`
@@ -255,7 +276,11 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 
 ## Role 文件
 
-- 角色定义仍保存在运行目录下的 `roles/*.md`。
+- 角色定义与状态不再跟随启动目录，统一保存在状态目录。
+- 默认状态目录：`$CODEX_HOME/changxian-agent/remote-control`（若 `CODEX_HOME` 未设置则为 `~/.codex/changxian-agent/remote-control`，Windows 同样适用）。
+- 可通过 `TG_STATE_DIR` 自定义状态目录。
+- 关键持久化文件：`agent_state.sqlite3`、`roles/*.md`、`chat_roles.json`、`chat_sessions.json`、`chat_workdirs.json`。
+- 首次升级到此版本时，会自动尝试从旧的运行目录迁移以上状态文件。
 - Skill 打包目录位于仓库根目录 `changxian-agent-skills/`，启动时会自动同步到本机 Codex skills 目录。
 - 首次启动会自动创建示例角色：`reviewer`、`writer`、`researcher`。
 - `changxian-role-manager` 会在每轮对话中加载当前角色与角色列表，并可通过自然语言创建、更新、启用或清除角色。

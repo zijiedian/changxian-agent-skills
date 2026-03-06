@@ -27,6 +27,9 @@ RUNTIME_FILES = [
     "requirements.txt",
     "scheduler.py",
     "settings.py",
+    "start.py",
+    "start.ps1",
+    "start.cmd",
     "start.sh",
 ]
 

@@ -47,6 +47,8 @@ When persistent role state should change, append exactly one fenced block at the
 {"ops":[...]}
 ```
 
+Storage note: this skill emits role operations only. The host bridge consumes `tg-role-ops` and persists role definitions and active-role mapping to its state store (for changxian remote control, `roles/*.md` and `chat_roles.json`).
+
 Supported operations:
 
 - `upsert_role`

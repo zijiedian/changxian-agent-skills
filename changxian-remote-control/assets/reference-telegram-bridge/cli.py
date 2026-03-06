@@ -15,7 +15,7 @@ from pathlib import Path
 import uvicorn
 
 from app_factory import build_app
-from settings import load_settings, runtime_base_dir
+from settings import load_settings, state_env_path
 
 ENV_KEYS = [
     "TG_BOT_TOKEN",
@@ -58,7 +58,7 @@ ID_ITEM_RE = re.compile(r"^-?\d+$")
 
 
 def _env_path() -> Path:
-    return runtime_base_dir() / ".env"
+    return state_env_path()
 
 
 def _load_existing_env(path: Path) -> dict[str, str]:
@@ -108,6 +108,7 @@ def _normalize_id_csv(raw: str) -> str:
 
 
 def _write_env(path: Path, payload: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{key}={payload.get(key, '')}" for key in ENV_KEYS]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
@@ -125,7 +126,7 @@ def _telegram_api_get(token: str, method: str, params: dict[str, str] | None = N
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "tg-codex",
+            "User-Agent": "remote-control",
             "Accept": "application/json",
         },
     )
@@ -221,7 +222,7 @@ def _discover_chat_user_ids(token: str, wait_seconds: int = 18) -> tuple[str, st
                 raise RuntimeError(
                     "Cannot auto-discover chat_id/user_id because webhook mode is active. "
                     "Disable webhook first (or switch to webhook deployment), then rerun "
-                    "`tg-codex --token <TG_BOT_TOKEN>`."
+                    "`python start.py --token <TG_BOT_TOKEN>`."
                 ) from err
             raise
 
@@ -275,7 +276,7 @@ def _resolve_and_fill_ids(token: str, chat_ids: str, user_ids: str) -> tuple[str
         raise RuntimeError(
             f"Cannot auto-discover {missing_text} yet. "
             "Please send /start (or any message) to your bot from the target private chat/group, "
-            "then rerun `tg-codex --token <TG_BOT_TOKEN>`."
+            "then rerun `python start.py --token <TG_BOT_TOKEN>`."
         )
     return normalized_chat, normalized_user
 
@@ -287,7 +288,7 @@ def _prepare_env_for_start(token_override: str | None) -> tuple[str, bool]:
     token = _pick(existing, "TG_BOT_TOKEN", token_override, os.getenv("TG_BOT_TOKEN", "").strip())
     if not token:
         raise RuntimeError(
-            "TG_BOT_TOKEN is required. Run once with `tg-codex --token <TG_BOT_TOKEN>`."
+            "TG_BOT_TOKEN is required. Run once with `python start.py --token <TG_BOT_TOKEN>`."
         )
 
     chat_ids = _normalize_id_csv(existing.get("TG_ALLOWED_CHAT_IDS", ""))
@@ -345,7 +346,7 @@ def start_service(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="tg-codex", description="Telegram to Codex bridge")
+    parser = argparse.ArgumentParser(prog="remote-control", description="Telegram remote-control bridge")
     parser.add_argument("--token", help="TG_BOT_TOKEN (optional, used for one-line first start)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
@@ -365,7 +366,7 @@ def main() -> int:
     if argv and argv[0] == "start":
         argv = argv[1:]
     if argv and argv[0] == "init":
-        print("Error: `init` has been removed. Use `tg-codex --token <TG_BOT_TOKEN>` to start.", file=sys.stderr)
+        print("Error: `init` has been removed. Use `python start.py --token <TG_BOT_TOKEN>` to start.", file=sys.stderr)
         return 1
 
     args = parser.parse_args(argv)
