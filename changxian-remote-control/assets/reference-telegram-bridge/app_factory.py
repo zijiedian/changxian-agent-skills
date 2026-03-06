@@ -57,7 +57,6 @@ def build_app(settings: Settings) -> tuple[FastAPI, Optional[Application]]:
         telegram_app.add_handler(CommandHandler("new", bridge.new_session))
         telegram_app.add_handler(CommandHandler("cwd", bridge.cwd))
         telegram_app.add_handler(CommandHandler("skill", bridge.skill))
-        telegram_app.add_handler(CommandHandler("schedule", bridge.schedule))
         telegram_app.add_handler(CommandHandler("auth", bridge.auth))
         telegram_app.add_handler(CommandHandler("cmd", bridge.cmd))
         telegram_app.add_handler(CommandHandler("setting", bridge.setting))

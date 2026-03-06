@@ -61,6 +61,7 @@ When the host also supports durable state:
 
 - use `changxian-memory-manager` for long-term preferences and facts
 - use `changxian-role-manager` for reusable working modes and personas
+- use `changxian-schedule` for scheduled-job lifecycle (create/update/pause/resume/run/delete)
 
 Do not duplicate those responsibilities here. Coordinate with them.
 
@@ -93,7 +94,7 @@ The installed runtime exposes:
 The bundled standalone package includes:
 
 - the bridge runtime copied from the current changxian-agent bridge
-- vendored copies of `changxian-memory-manager`, `changxian-role-manager`, and `changxian-remote-control`
+- vendored copies of `changxian-memory-manager`, `changxian-role-manager`, `changxian-schedule`, and `changxian-remote-control`
 
 ## Examples
 

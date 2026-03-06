@@ -8,6 +8,7 @@
 - `assets/standalone-skills/` - vendored copies of:
   - `changxian-memory-manager`
   - `changxian-role-manager`
+  - `changxian-schedule`
   - `changxian-remote-control`
 - `scripts/install_reference_telegram_bridge.py` - installs the standalone bridge into a target directory
 

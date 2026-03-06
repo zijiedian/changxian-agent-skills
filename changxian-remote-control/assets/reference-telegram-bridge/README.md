@@ -63,7 +63,6 @@ id - 查看 chat/user id
 new - 重置会话
 cwd - 设置工作目录
 skill - 列出/切换技能
-schedule - 管理定时任务
 status - 查看运行状态
 cancel - 取消当前任务
 auth - 认证会话
@@ -245,15 +244,6 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - `/new`
 - `/cwd <path>` / `/cwd reset`
 - `/skill` / `/skill <name>`
-- `/schedule`
-- `/schedule show <job_id>`
-- `/schedule add every 1h | <prompt>`
-- `/schedule add once 2026-03-07 09:30 | <prompt>`
-- `/schedule add cron 0 9 * * * | <prompt>`
-- `/schedule set <job_id> role | reviewer`
-- `/schedule set <job_id> memory_scope | project:remote-control`
-- `/schedule set <job_id> session_policy | fresh`
-- `/schedule run <job_id>` / `/schedule pause <job_id>` / `/schedule resume <job_id>` / `/schedule rm <job_id>`
 - `/status`
 - `/cancel`
 - `/auth <passphrase>`
@@ -272,6 +262,8 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - 例如直接发送：`记住以后默认中文回答，先给结论再展开`、`忘掉我之前说的英文优先`
 - 角色系统不再通过 `/role` 命令管理，而是由内置 skill `changxian-role-manager` 自动加载与维护
 - 例如直接发送：`创建一个 api-reviewer 角色，以后默认用它`、`以后用 researcher 这个角色`、`不要再默认用任何角色了`
+- 定时任务不再通过 `/schedule` 命令管理，而是由内置 skill `changxian-schedule` 自动加载与维护
+- 例如直接发送：`每天早上 9 点检查部署状态并发摘要`、`暂停 job_xxx`、`删除 job_xxx`
 - `/xxx` 仅用于控制类命令（如 `/status`、`/cwd`、`/cancel`）
 
 ## Role 文件
@@ -284,8 +276,7 @@ python cli.py --token <TG_BOT_TOKEN> --port 18000
 - Skill 打包目录位于仓库根目录 `changxian-agent-skills/`，启动时会自动同步到本机 Codex skills 目录。
 - 首次启动会自动创建示例角色：`reviewer`、`writer`、`researcher`。
 - `changxian-role-manager` 会在每轮对话中加载当前角色与角色列表，并可通过自然语言创建、更新、启用或清除角色。
-- 新建的定时任务会继承当时的当前角色。
-- 已有定时任务可通过 `/schedule set` 单独修改 `role`、`memory_scope`、`session_policy`。
+- `changxian-schedule` 会在每轮对话中加载当前定时任务状态，并通过 `tg-schedule-ops` 维护任务生命周期。
 
 ## /cmd 权限档位说明
 

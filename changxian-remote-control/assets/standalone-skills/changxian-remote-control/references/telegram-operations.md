@@ -18,19 +18,17 @@
 
 ## Scheduled Jobs
 
-Examples:
+The reference bridge no longer exposes `/schedule` commands.
+Use `changxian-schedule` with `tg-schedule-ops` blocks to manage scheduled jobs.
 
-- `/schedule add every 1h | summarize the latest logs`
-- `/schedule add once 2026-03-07 09:30 | review open pull requests`
-- `/schedule add cron 0 9 * * * | check deployment health`
-- `/schedule set <job_id> role | reviewer`
-- `/schedule set <job_id> memory_scope | project:changxian-agent`
-- `/schedule run <job_id>`
-- `/schedule pause <job_id>`
-- `/schedule resume <job_id>`
-- `/schedule rm <job_id>`
+Example operation block:
+
+```tg-schedule-ops
+{"ops":[{"op":"create_job","schedule_type":"cron","schedule_expr":"0 9 * * *","prompt":"check deployment health and summarize failures","timezone":"Asia/Shanghai"}]}
+```
 
 ## Collaboration With Other Skills
 
 - Use `changxian-memory-manager` for durable preferences and facts.
 - Use `changxian-role-manager` for persistent reusable roles.
+- Use `changxian-schedule` for persistent scheduled-job management.

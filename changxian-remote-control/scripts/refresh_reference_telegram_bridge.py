@@ -36,6 +36,7 @@ RUNTIME_FILES = [
 DEPENDENCY_SKILLS = [
     "changxian-memory-manager",
     "changxian-role-manager",
+    "changxian-schedule",
     "changxian-remote-control",
 ]
 

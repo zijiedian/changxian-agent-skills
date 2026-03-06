@@ -36,7 +36,11 @@ Do not save:
 - Treat `[ROLE STATE]` as the authoritative list of saved roles and the current active role.
 - If the user asks to use a role for this turn, do so immediately in the response.
 - Emit a role-ops block only when the role catalog or active role should persist after this turn.
+- If the user request is not about role management, never emit a role-ops block.
 - When updating an existing role, overwrite the canonical definition instead of creating duplicates.
+- Avoid no-op role operations that only repeat the current role content or active-role state.
+- Do not add routine "role reminder" prose in normal replies.
+- When role state really changes, explain the concrete change points briefly (added/updated/activated/cleared/deleted role).
 - Use lowercase hyphenated role names.
 
 ## Output Protocol

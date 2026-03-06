@@ -171,10 +171,27 @@ ROLE_TEMPLATES = {
 
 MEMORY_SKILL_NAME = "changxian-memory-manager"
 ROLE_SKILL_NAME = "changxian-role-manager"
+SCHEDULE_SKILL_NAME = "changxian-schedule"
 REMOTE_CONTROL_SKILL_NAME = "changxian-remote-control"
 MEMORY_OPS_BLOCK_RE = re.compile(r"```tg-memory-ops\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 ROLE_OPS_BLOCK_RE = re.compile(r"```tg-role-ops\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+SCHEDULE_OPS_BLOCK_RE = re.compile(r"```tg-schedule-ops\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 ROLE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+ROLE_SYNC_INTENT_RE = re.compile(
+    r"(?i)(?:/role\b|\brole\b|roles\b|use role|activate role|switch role|clear role|delete role|create role|update role|角色|人设|扮演)"
+)
+SCHEDULE_SYNC_ACTION_RE = re.compile(
+    r"(?i)(?:create job|add job|new job|update job|set job|pause job|resume job|run job|trigger job|delete job|remove job|"
+    r"新建(?:计划)?任务|创建(?:计划)?任务|添加(?:计划)?任务|新增(?:计划)?任务|更新(?:计划)?任务|修改(?:计划)?任务|编辑(?:计划)?任务|"
+    r"暂停(?:计划)?任务|恢复(?:计划)?任务|启用(?:计划)?任务|禁用(?:计划)?任务|删除(?:计划)?任务|移除(?:计划)?任务|触发(?:计划)?任务|"
+    r"创建定时|新增定时|添加定时|更新定时|修改定时|暂停定时|恢复定时|删除定时|设置定时)"
+)
+SCHEDULE_SYNC_SCHEDULE_RE = re.compile(
+    r"(?i)(?:\bcron\b|\bevery\b|\bonce\b|每天|每周|每月|每隔)"
+)
+SCHEDULE_SYNC_READONLY_RE = re.compile(
+    r"(?i)(?:查看|显示|列出|罗列|详情|细节|状态|有哪些|show|display|list|detail|details|status|inspect)"
+)
 
 
 class Bridge:
@@ -938,6 +955,32 @@ class Bridge:
 
         return "\n".join(lines) if lines else "No active memories are stored for this chat yet."
 
+    def _format_schedule_state(self, chat_id: int) -> str:
+        if not self.settings.enable_scheduler:
+            return "Scheduler is disabled for this bridge instance."
+
+        jobs = self.scheduler_store.list_jobs(chat_id)
+        if not jobs:
+            return "No scheduled jobs are stored for this chat yet."
+
+        lines: list[str] = []
+        total_chars = 0
+        max_chars = 2600
+        for job in jobs:
+            state = "enabled" if job.enabled else "paused"
+            prompt_preview = self._truncate_text(" ".join(job.prompt_template.split()), limit=220)
+            entry = (
+                f"- id={job.id} state={state} schedule={job.schedule_type} {job.schedule_expr} tz={job.timezone} "
+                f"next={self._format_timestamp(job.next_run_at, job.timezone)} role={job.role or '(none)'}\n"
+                f"  memory_scope={job.memory_scope or '(none)'} session_policy={job.session_policy} prompt={prompt_preview}"
+            )
+            if total_chars + len(entry) > max_chars:
+                break
+            lines.append(entry)
+            total_chars += len(entry)
+
+        return "\n".join(lines) if lines else "No scheduled jobs are stored for this chat yet."
+
     def _build_prompt_with_memory(self, request: ExecutionRequest) -> tuple[str, list[MemoryRecord]]:
         prompt = request.prompt.strip()
         if not prompt:
@@ -997,6 +1040,21 @@ class Bridge:
                 + self._format_memory_state(memories)
             )
 
+        if self.settings.enable_scheduler:
+            skill_body = self._read_skill_body(SCHEDULE_SKILL_NAME)
+            if skill_body:
+                sections.append(
+                    "[SCHEDULE SKILL]\n"
+                    f"Skill name: {SCHEDULE_SKILL_NAME}\n"
+                    "The following skill is preloaded by changxian-agent for scheduled-job management. Follow it when creating, updating, pausing, resuming, triggering, or deleting schedules.\n\n"
+                    + skill_body
+                )
+            sections.append(
+                "[SCHEDULE STATE]\n"
+                "This schedule state is loaded at conversation init and refreshed on each turn. Use it as the authoritative scheduled-job state for this chat.\n"
+                + self._format_schedule_state(request.chat_id)
+            )
+
         sections.append("[CURRENT TASK]\n" + prompt)
         return "\n\n".join(section for section in sections if section.strip()), memories
 
@@ -1027,6 +1085,66 @@ class Bridge:
         compact = re.sub(r"\n{3,}", "\n\n", stripped).strip()
         return operations, compact
 
+    @staticmethod
+    def _has_role_sync_intent(prompt: str) -> bool:
+        return bool(ROLE_SYNC_INTENT_RE.search(prompt or ""))
+
+    @staticmethod
+    def _has_schedule_sync_intent(prompt: str) -> bool:
+        text = (prompt or "").strip()
+        if not text:
+            return False
+        if SCHEDULE_SYNC_ACTION_RE.search(text):
+            return True
+        if SCHEDULE_SYNC_READONLY_RE.search(text):
+            return False
+        return bool(SCHEDULE_SYNC_SCHEDULE_RE.search(text))
+
+    @staticmethod
+    def _normalize_schedule_signature_value(raw_value: object) -> str:
+        return " ".join(str(raw_value or "").split()).strip().lower()
+
+    def _find_duplicate_schedule_job(
+        self,
+        *,
+        chat_id: int,
+        schedule_type: str,
+        schedule_expr: str,
+        timezone: str,
+        prompt_template: str,
+        role: str,
+        memory_scope: str,
+        workdir: str,
+        command_prefix: str,
+        session_policy: str,
+    ) -> Optional[ScheduledJob]:
+        signature = (
+            self._normalize_schedule_signature_value(schedule_type),
+            self._normalize_schedule_signature_value(schedule_expr),
+            self._normalize_schedule_signature_value(timezone),
+            self._normalize_schedule_signature_value(prompt_template),
+            self._normalize_schedule_signature_value(role),
+            self._normalize_schedule_signature_value(memory_scope),
+            self._normalize_schedule_signature_value(workdir),
+            self._normalize_schedule_signature_value(command_prefix),
+            self._normalize_schedule_signature_value(session_policy),
+        )
+        for job in self.scheduler_store.list_jobs(chat_id):
+            job_signature = (
+                self._normalize_schedule_signature_value(job.schedule_type),
+                self._normalize_schedule_signature_value(job.schedule_expr),
+                self._normalize_schedule_signature_value(job.timezone),
+                self._normalize_schedule_signature_value(job.prompt_template),
+                self._normalize_schedule_signature_value(job.role),
+                self._normalize_schedule_signature_value(job.memory_scope),
+                self._normalize_schedule_signature_value(job.workdir),
+                self._normalize_schedule_signature_value(job.command_prefix),
+                self._normalize_schedule_signature_value(job.session_policy),
+            )
+            if job_signature == signature:
+                return job
+        return None
+
     def _apply_role_skill_ops(self, request: ExecutionRequest, operations: list[dict]) -> str:
         if not operations:
             return ""
@@ -1036,7 +1154,7 @@ class Bridge:
         activated = 0
         cleared = 0
         deleted = 0
-        ignored = 0
+        change_details: list[str] = []
 
         for op in operations:
             action = str(op.get("op") or op.get("action") or "").strip().lower()
@@ -1045,67 +1163,85 @@ class Bridge:
             if action in {"upsert_role", "save_role", "create_role", "update_role"}:
                 content = str(op.get("content") or op.get("definition") or "").strip()
                 if not role_name_raw or not content:
-                    ignored += 1
                     continue
                 try:
                     normalized = self._normalize_role_name(role_name_raw)
                 except ValueError:
-                    ignored += 1
                     continue
-                existed_before = self._role_path(normalized).exists()
-                try:
-                    self._write_role_content(normalized, content)
-                except ValueError:
-                    ignored += 1
-                    continue
+
+                role_path = self._role_path(normalized)
+                existed_before = role_path.exists()
                 if existed_before:
-                    updated += 1
+                    try:
+                        existing_content = self._read_role_content(normalized)
+                    except ValueError:
+                        existing_content = ""
+                    if existing_content != content:
+                        try:
+                            self._write_role_content(normalized, content)
+                        except ValueError:
+                            continue
+                        updated += 1
+                        change_details.append(f"updated role {normalized}: content")
                 else:
+                    try:
+                        self._write_role_content(normalized, content)
+                    except ValueError:
+                        continue
                     added += 1
+                    change_details.append(f"added role {normalized}")
+
                 if bool(op.get("activate") or op.get("use") or op.get("select")):
-                    self._set_chat_role(request.chat_id, normalized)
-                    activated += 1
+                    current_role = self._active_role_name(request.chat_id)
+                    if current_role != normalized:
+                        self._set_chat_role(request.chat_id, normalized)
+                        activated += 1
+                        change_details.append(f"activated role {normalized}")
                 continue
 
             if action in {"use_role", "select_role", "activate_role"}:
                 if not role_name_raw:
-                    ignored += 1
                     continue
                 try:
                     normalized = self._normalize_role_name(role_name_raw)
                 except ValueError:
-                    ignored += 1
                     continue
-                if normalized not in self._list_roles():
-                    ignored += 1
+                if not self._role_path(normalized).exists():
+                    continue
+                current_role = self._active_role_name(request.chat_id)
+                if current_role == normalized:
                     continue
                 self._set_chat_role(request.chat_id, normalized)
                 activated += 1
+                change_details.append(f"activated role {normalized}")
                 continue
 
             if action in {"clear_role", "reset_role", "unset_role"}:
-                if self._clear_chat_role(request.chat_id):
+                previous_role = self._active_role_name(request.chat_id)
+                if previous_role and self._clear_chat_role(request.chat_id):
                     cleared += 1
-                else:
-                    ignored += 1
+                    change_details.append(f"cleared active role ({previous_role})")
                 continue
 
             if action in {"delete_role", "remove_role"}:
                 if not role_name_raw:
-                    ignored += 1
                     continue
                 try:
-                    changed = self._delete_role(role_name_raw)
+                    normalized = self._normalize_role_name(role_name_raw)
                 except ValueError:
-                    ignored += 1
                     continue
+                previous_role = self._active_role_name(request.chat_id)
+                changed = self._delete_role(normalized)
                 if changed:
                     deleted += 1
-                else:
-                    ignored += 1
+                    change_details.append(f"deleted role {normalized}")
+                    if previous_role == normalized:
+                        cleared += 1
+                        change_details.append(f"cleared active role ({normalized})")
                 continue
 
-            ignored += 1
+        if not change_details:
+            return ""
 
         parts: list[str] = []
         if added:
@@ -1118,9 +1254,296 @@ class Bridge:
             parts.append(f"cleared {cleared}")
         if deleted:
             parts.append(f"deleted {deleted}")
-        if ignored:
-            parts.append(f"ignored {ignored}")
-        return ", ".join(parts)
+
+        lines = [", ".join(parts) if parts else f"changed {len(change_details)}"]
+        preview_count = min(6, len(change_details))
+        for detail in change_details[:preview_count]:
+            lines.append(f"- {detail}")
+        if len(change_details) > preview_count:
+            lines.append(f"- and {len(change_details) - preview_count} more changes")
+        return "\n".join(lines)
+
+    def _extract_schedule_ops(self, output: str) -> tuple[list[dict], str]:
+        payloads: list[str] = []
+
+        def _replace(match: re.Match[str]) -> str:
+            payload = (match.group(1) or "").strip()
+            if payload:
+                payloads.append(payload)
+            return ""
+
+        stripped = SCHEDULE_OPS_BLOCK_RE.sub(_replace, output)
+        operations: list[dict] = []
+        for payload in payloads:
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                raw_ops = parsed.get("ops", [])
+            elif isinstance(parsed, list):
+                raw_ops = parsed
+            else:
+                raw_ops = []
+            if isinstance(raw_ops, list):
+                operations.extend(item for item in raw_ops if isinstance(item, dict))
+        compact = re.sub(r"\n{3,}", "\n\n", stripped).strip()
+        return operations, compact
+
+    def _find_schedule_job_for_op(self, request: ExecutionRequest, op: dict) -> Optional[ScheduledJob]:
+        job_id = str(op.get("job_id") or op.get("id") or "").strip()
+        if job_id:
+            return self.scheduler_store.get_job(request.chat_id, job_id)
+
+        jobs = self.scheduler_store.list_jobs(request.chat_id)
+        name = str(op.get("name") or op.get("job_name") or "").strip().lower()
+        query = str(op.get("query") or op.get("contains") or op.get("match") or "").strip().lower()
+
+        if name:
+            for job in jobs:
+                if job.name.strip().lower() == name:
+                    return job
+        if query:
+            for job in jobs:
+                haystack = f"{job.id}\n{job.name}\n{job.prompt_template}".lower()
+                if query in haystack:
+                    return job
+        return None
+
+    @staticmethod
+    def _normalize_schedule_session_policy(raw_value: str) -> str:
+        normalized = (raw_value or "").strip().lower()
+        policy_aliases = {
+            "resume": "resume-job",
+            "resume-job": "resume-job",
+            "fresh": "fresh",
+        }
+        return policy_aliases.get(normalized, "")
+
+    async def _apply_schedule_skill_ops(self, request: ExecutionRequest, operations: list[dict]) -> str:
+        if not self.settings.enable_scheduler or not operations:
+            return ""
+
+        created = 0
+        reused = 0
+        updated = 0
+        paused = 0
+        resumed = 0
+        triggered = 0
+        deleted = 0
+        change_details: list[str] = []
+
+        for op in operations:
+            action = str(op.get("op") or op.get("action") or "").strip().lower()
+            target = self._find_schedule_job_for_op(request, op)
+
+            if action in {"create_job", "add_job"}:
+                prompt_text = str(op.get("prompt") or op.get("prompt_template") or op.get("task") or "").strip()
+                schedule_kind = str(op.get("schedule_type") or op.get("type") or op.get("kind") or "").strip().lower()
+                schedule_expr = str(op.get("schedule_expr") or op.get("expr") or op.get("schedule") or "").strip()
+                if not prompt_text or not schedule_kind or not schedule_expr:
+                    continue
+
+                timezone_name = str(op.get("timezone") or self.settings.default_timezone).strip() or self.settings.default_timezone
+                try:
+                    normalized_expr, next_run_at = parse_schedule_spec(
+                        schedule_kind,
+                        schedule_expr,
+                        timezone_name,
+                        int(time.time()),
+                    )
+                except ValueError:
+                    continue
+
+                role_value = str(op.get("role") or "").strip().lower()
+                if role_value in {"default", "current"}:
+                    role_value = self._active_role_name(request.chat_id)
+                elif role_value in {"none", "off", "clear", "reset"}:
+                    role_value = ""
+                elif role_value and not self._role_path(role_value).exists():
+                    continue
+                elif not role_value:
+                    role_value = self._active_role_name(request.chat_id)
+
+                memory_scope = str(op.get("memory_scope") or request.memory_scope or self._default_memory_scope(request.chat_id)).strip()
+                session_policy = self._normalize_schedule_session_policy(str(op.get("session_policy") or "resume-job")) or "resume-job"
+                name = str(op.get("name") or "").strip() or self._truncate_text(prompt_text.splitlines()[0].strip() or "scheduled task", limit=48)
+                effective_workdir = str(request.workdir or self._effective_workdir(request.chat_id))
+                effective_command_prefix = request.command_prefix or self.codex_prefix
+
+                duplicate_job = self._find_duplicate_schedule_job(
+                    chat_id=request.chat_id,
+                    schedule_type=schedule_kind,
+                    schedule_expr=normalized_expr,
+                    timezone=timezone_name,
+                    prompt_template=prompt_text,
+                    role=role_value,
+                    memory_scope=memory_scope,
+                    workdir=effective_workdir,
+                    command_prefix=effective_command_prefix,
+                    session_policy=session_policy,
+                )
+                if duplicate_job is not None:
+                    reused += 1
+                    change_details.append(f"ignored duplicate create for {duplicate_job.id}")
+                    continue
+
+                job = self.scheduler_store.add_job(
+                    chat_id=request.chat_id,
+                    owner_user_id=request.owner_user_id,
+                    name=name,
+                    schedule_type=schedule_kind,
+                    schedule_expr=normalized_expr,
+                    timezone=timezone_name,
+                    prompt_template=prompt_text,
+                    role=role_value,
+                    memory_scope=memory_scope,
+                    workdir=effective_workdir,
+                    command_prefix=effective_command_prefix,
+                    session_policy=session_policy,
+                    concurrency_policy="skip",
+                    next_run_at=next_run_at,
+                )
+                if "enabled" in op and not bool(op.get("enabled")):
+                    self.scheduler_store.set_enabled(request.chat_id, job.id, False, job.next_run_at)
+                created += 1
+                change_details.append(f"created {job.id} ({self._truncate_text(job.name, limit=48)})")
+                continue
+
+            if action in {"set_job", "update_job"}:
+                if target is None:
+                    continue
+
+                role_value = None
+                memory_scope_value = None
+                session_policy_value = None
+                changed_fields: list[str] = []
+
+                if "role" in op:
+                    normalized = str(op.get("role") or "").strip().lower()
+                    if normalized in {"", "none", "off", "clear", "reset"}:
+                        role_value = ""
+                    elif normalized in {"default", "current"}:
+                        role_value = self._active_role_name(request.chat_id)
+                    elif self._role_path(normalized).exists():
+                        role_value = normalized
+                    else:
+                        role_value = None
+                    if role_value is not None and role_value != target.role:
+                        changed_fields.append("role")
+                    else:
+                        role_value = None
+
+                if "memory_scope" in op or "scope" in op:
+                    raw_scope = str(op.get("memory_scope") or op.get("scope") or "").strip()
+                    if raw_scope.lower() in {"default", "chat", "chat:current", "reset"}:
+                        raw_scope = request.memory_scope or self._default_memory_scope(request.chat_id)
+                    if raw_scope and raw_scope != target.memory_scope:
+                        memory_scope_value = raw_scope
+                        changed_fields.append("memory_scope")
+
+                if "session_policy" in op or "session" in op:
+                    normalized_policy = self._normalize_schedule_session_policy(
+                        str(op.get("session_policy") or op.get("session") or "")
+                    )
+                    if normalized_policy and normalized_policy != target.session_policy:
+                        session_policy_value = normalized_policy
+                        changed_fields.append("session_policy")
+
+                if not changed_fields:
+                    continue
+
+                updated_job = self.scheduler_store.update_job_fields(
+                    request.chat_id,
+                    target.id,
+                    role=role_value,
+                    memory_scope=memory_scope_value,
+                    session_policy=session_policy_value,
+                )
+                if updated_job is None:
+                    continue
+                if session_policy_value == "fresh":
+                    self.scheduler_store.clear_job_session(updated_job.id)
+                updated += 1
+                change_details.append(f"updated {updated_job.id}: {', '.join(changed_fields)}")
+                continue
+
+            if action in {"pause_job", "disable_job"}:
+                if target is None or not target.enabled:
+                    continue
+                if self.scheduler_store.set_enabled(request.chat_id, target.id, False, target.next_run_at):
+                    paused += 1
+                    change_details.append(f"paused {target.id}")
+                continue
+
+            if action in {"resume_job", "enable_job"}:
+                if target is None or target.enabled:
+                    continue
+                now_ts = int(time.time())
+                if target.schedule_type == "once":
+                    if target.next_run_at is None or target.next_run_at <= now_ts:
+                        continue
+                    next_run_at = target.next_run_at
+                else:
+                    try:
+                        _normalized_expr, next_run_at = parse_schedule_spec(
+                            target.schedule_type,
+                            target.schedule_expr,
+                            target.timezone,
+                            now_ts,
+                        )
+                    except ValueError:
+                        continue
+                if self.scheduler_store.set_enabled(request.chat_id, target.id, True, next_run_at):
+                    resumed += 1
+                    change_details.append(f"resumed {target.id}")
+                continue
+
+            if action in {"run_job", "trigger_job"}:
+                if target is None:
+                    continue
+                try:
+                    run_id = await self.scheduler_service.trigger_job_now(target)
+                except RuntimeError:
+                    continue
+                triggered += 1
+                change_details.append(f"triggered {target.id} (run {run_id})")
+                continue
+
+            if action in {"delete_job", "remove_job"}:
+                if target is None:
+                    continue
+                if self.scheduler_store.delete_job(request.chat_id, target.id):
+                    deleted += 1
+                    change_details.append(f"deleted {target.id}")
+                continue
+
+        if not change_details:
+            return ""
+
+        parts: list[str] = []
+        if created:
+            parts.append(f"created {created}")
+        if reused:
+            parts.append(f"reused {reused}")
+        if updated:
+            parts.append(f"updated {updated}")
+        if paused:
+            parts.append(f"paused {paused}")
+        if resumed:
+            parts.append(f"resumed {resumed}")
+        if triggered:
+            parts.append(f"triggered {triggered}")
+        if deleted:
+            parts.append(f"deleted {deleted}")
+
+        lines = [", ".join(parts) if parts else f"changed {len(change_details)}"]
+        preview_count = min(6, len(change_details))
+        for detail in change_details[:preview_count]:
+            lines.append(f"- {detail}")
+        if len(change_details) > preview_count:
+            lines.append(f"- and {len(change_details) - preview_count} more changes")
+        return "\n".join(lines)
 
     def _extract_memory_ops(self, output: str) -> tuple[list[dict], str]:
         payloads: list[str] = []
@@ -2767,6 +3190,7 @@ class Bridge:
             f"\nSecond-factor auth: <b>{auth_status}</b>"
             "\nMemory: <b>skill-managed</b> via <code>changxian-memory-manager</code>"
             "\nRole: <b>skill-managed</b> via <code>changxian-role-manager</code>"
+            "\nSchedule: <b>skill-managed</b> via <code>changxian-schedule</code>"
             "\n\nPlain text mode: <b>ON</b> (all non-<code>/xxx</code> text will run as prompt).",
         )
 
@@ -3544,310 +3968,6 @@ class Bridge:
 
         await self.send_html(update, "<b>Unknown memory command</b>\nUse <code>/memory</code> for usage.")
 
-    async def schedule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if update.effective_chat is None:
-            return
-        chat_id = update.effective_chat.id
-        if not self._is_update_authorized(update):
-            await self.send_html(update, "<b>Access denied</b>")
-            return
-
-        raw = " ".join(context.args).strip()
-        sub = context.args[0].strip().lower() if context.args else "list"
-        rest = " ".join(context.args[1:]).strip() if len(context.args) > 1 else ""
-
-        if not raw or sub in {"list", "ls"}:
-            jobs = self.scheduler_store.list_jobs(chat_id)
-            lines = [
-                "<b>Schedules</b>",
-                f"Default timezone: {self._code_inline(self.settings.default_timezone)}",
-                f"Enabled jobs: <b>{self.scheduler_store.count_jobs(chat_id, enabled_only=True)}</b>",
-                "",
-            ]
-            if jobs:
-                for index, job in enumerate(jobs[:10], start=1):
-                    state = "enabled" if job.enabled else "paused"
-                    lines.append(
-                        f"{index}. {self._code_inline(job.id)} <b>{html.escape(job.name)}</b> ({state})\n"
-                        f"when: {self._code_inline(job.schedule_type + ' ' + job.schedule_expr)}\n"
-                        f"next: {self._code_inline(self._format_timestamp(job.next_run_at, job.timezone))}\n"
-                        f"role: {self._code_inline(job.role or '(none)')}"
-                    )
-                if len(jobs) > 10:
-                    lines.append(f"... and <b>{len(jobs) - 10}</b> more jobs")
-            else:
-                lines.append("No scheduled jobs yet.")
-            lines.extend(
-                [
-                    "",
-                    "<b>Usage</b>",
-                    "<code>/schedule show &lt;job_id&gt;</code>",
-                    "<code>/schedule add every 1h | &lt;prompt&gt;</code>",
-                    "<code>/schedule add once 2026-03-07 09:30 | &lt;prompt&gt;</code>",
-                    "<code>/schedule add cron 0 9 * * * | &lt;prompt&gt;</code>",
-                    "<code>/schedule set &lt;job_id&gt; role | reviewer</code>",
-                    "<code>/schedule set &lt;job_id&gt; memory_scope | project:remote-control</code>",
-                    "<code>/schedule set &lt;job_id&gt; session_policy | fresh</code>",
-                    "<code>/schedule run &lt;job_id&gt;</code>",
-                    "<code>/schedule pause &lt;job_id&gt;</code>",
-                    "<code>/schedule resume &lt;job_id&gt;</code>",
-                    "<code>/schedule rm &lt;job_id&gt;</code>",
-                ]
-            )
-            await self.send_html(update, "\n".join(lines).strip())
-            return
-
-        if sub == "show":
-            job_id = rest.strip()
-            if not job_id:
-                await self.send_html(update, "<b>Usage</b>\n<code>/schedule show &lt;job_id&gt;</code>")
-                return
-            job = self.scheduler_store.get_job(chat_id, job_id)
-            if job is None:
-                await self.send_html(update, "<b>Job not found</b>")
-                return
-            state = "enabled" if job.enabled else "paused"
-            prompt_text = html.escape(self._truncate_text(job.prompt_template, limit=1500))
-            await self.send_html(
-                update,
-                "<b>Schedule</b>\n"
-                f"ID: {self._code_inline(job.id)}\n"
-                f"Name: {html.escape(job.name)}\n"
-                f"State: <b>{state}</b>\n"
-                f"Schedule: {self._code_inline(job.schedule_type + ' ' + job.schedule_expr)}\n"
-                f"Timezone: {self._code_inline(job.timezone)}\n"
-                f"Next run: {self._code_inline(self._format_timestamp(job.next_run_at, job.timezone))}\n"
-                f"Last run: {self._code_inline(self._format_timestamp(job.last_run_at, job.timezone))}\n"
-                f"Role: {self._code_inline(job.role or '(none)')}\n"
-                f"Memory scope: {self._code_inline(job.memory_scope or '(none)')}\n"
-                f"Session policy: {self._code_inline(job.session_policy)}\n"
-                f"Workdir: {self._code_inline(job.workdir or '(none)')}\n"
-                f"Command prefix:\n{self._code_block(self._redacted_command_text(job.command_prefix or self.codex_prefix))}\n"
-                f"Prompt:\n<pre>{prompt_text}</pre>",
-            )
-            return
-
-        if sub == "add":
-            if not await self._ensure_second_factor(update):
-                return
-            if "|" not in rest:
-                await self.send_html(
-                    update,
-                    "<b>Usage</b>\n"
-                    "<code>/schedule add every 1h | &lt;prompt&gt;</code>\n"
-                    "<code>/schedule add once 2026-03-07 09:30 | &lt;prompt&gt;</code>\n"
-                    "<code>/schedule add cron 0 9 * * * | &lt;prompt&gt;</code>",
-                )
-                return
-            spec_raw, prompt_raw = rest.split("|", 1)
-            prompt_text = prompt_raw.strip()
-            spec = spec_raw.strip()
-            if not prompt_text or not spec:
-                await self.send_html(update, "<b>Invalid schedule</b>")
-                return
-            try:
-                schedule_kind, schedule_expr = spec.split(maxsplit=1)
-            except ValueError:
-                await self.send_html(update, "<b>Invalid schedule</b>\nMissing schedule expression.")
-                return
-            try:
-                normalized_expr, next_run_at = parse_schedule_spec(
-                    schedule_kind,
-                    schedule_expr,
-                    self.settings.default_timezone,
-                    int(time.time()),
-                )
-            except ValueError as err:
-                await self.send_html(update, f"<b>Invalid schedule</b>\n{self._code_inline(str(err))}")
-                return
-            job = self.scheduler_store.add_job(
-                chat_id=chat_id,
-                owner_user_id=update.effective_user.id if update.effective_user else None,
-                name=self._truncate_text(prompt_text.splitlines()[0].strip() or "scheduled task", limit=48),
-                schedule_type=schedule_kind.lower(),
-                schedule_expr=normalized_expr,
-                timezone=self.settings.default_timezone,
-                prompt_template=prompt_text,
-                role=self._active_role_name(chat_id),
-                memory_scope=self._default_memory_scope(chat_id),
-                workdir=str(self._effective_workdir(chat_id)),
-                command_prefix=self.codex_prefix,
-                session_policy="resume-job",
-                concurrency_policy="skip",
-                next_run_at=next_run_at,
-            )
-            await self.send_html(
-                update,
-                "<b>Schedule created</b>\n"
-                f"ID: {self._code_inline(job.id)}\n"
-                f"Next run: {self._code_inline(self._format_timestamp(job.next_run_at, job.timezone))}\n"
-                f"Workdir: {self._code_inline(job.workdir or str(self._effective_workdir(chat_id)))}\n"
-                f"Role: {self._code_inline(job.role or '(none)')}",
-            )
-            return
-
-        if sub == "set":
-            if not await self._ensure_second_factor(update):
-                return
-            if "|" not in rest:
-                await self.send_html(
-                    update,
-                    "<b>Usage</b>\n"
-                    "<code>/schedule set &lt;job_id&gt; role | reviewer</code>\n"
-                    "<code>/schedule set &lt;job_id&gt; memory_scope | project:remote-control</code>\n"
-                    "<code>/schedule set &lt;job_id&gt; session_policy | fresh</code>",
-                )
-                return
-            left_raw, value_raw = rest.split("|", 1)
-            left = left_raw.strip()
-            value = value_raw.strip()
-            if not left or not value:
-                await self.send_html(update, "<b>Invalid schedule update</b>")
-                return
-            try:
-                job_id, field = left.split(maxsplit=1)
-            except ValueError:
-                await self.send_html(update, "<b>Invalid schedule update</b>\nExpected: <code>/schedule set &lt;job_id&gt; &lt;field&gt; | &lt;value&gt;</code>")
-                return
-            field = field.strip().lower()
-            job = self.scheduler_store.get_job(chat_id, job_id)
-            if job is None:
-                await self.send_html(update, "<b>Job not found</b>")
-                return
-
-            role_value = None
-            memory_scope_value = None
-            session_policy_value = None
-            applied_value = value
-            extra_note = ""
-
-            if field == "role":
-                normalized = value.strip().lower()
-                if normalized in {"none", "off", "clear", "reset"}:
-                    role_value = ""
-                    applied_value = "(none)"
-                else:
-                    available_roles = self._list_roles()
-                    if normalized not in available_roles:
-                        await self.send_html(update, f"<b>Role not found</b>\nName: {self._code_inline(normalized)}")
-                        return
-                    role_value = normalized
-                    applied_value = normalized
-            elif field in {"memory_scope", "scope"}:
-                normalized_scope = value.strip()
-                if normalized_scope.lower() in {"default", "reset"}:
-                    normalized_scope = self._default_memory_scope(chat_id)
-                if not normalized_scope:
-                    await self.send_html(update, "<b>Invalid memory_scope</b>")
-                    return
-                memory_scope_value = normalized_scope
-                applied_value = normalized_scope
-                field = "memory_scope"
-            elif field in {"session_policy", "session"}:
-                normalized_policy = value.strip().lower()
-                policy_aliases = {
-                    "resume": "resume-job",
-                    "resume-job": "resume-job",
-                    "fresh": "fresh",
-                }
-                session_policy_value = policy_aliases.get(normalized_policy)
-                if session_policy_value is None:
-                    await self.send_html(update, "<b>Invalid session_policy</b>\nUse <code>resume-job</code> or <code>fresh</code>.")
-                    return
-                applied_value = session_policy_value
-                field = "session_policy"
-            else:
-                await self.send_html(
-                    update,
-                    "<b>Unsupported schedule field</b>\n"
-                    "Supported fields: <code>role</code>, <code>memory_scope</code>, <code>session_policy</code>.",
-                )
-                return
-
-            updated_job = self.scheduler_store.update_job_fields(
-                chat_id,
-                job.id,
-                role=role_value,
-                memory_scope=memory_scope_value,
-                session_policy=session_policy_value,
-            )
-            if updated_job is None:
-                await self.send_html(update, "<b>Job not found</b>")
-                return
-            if field == "session_policy" and session_policy_value == "fresh":
-                self.scheduler_store.clear_job_session(job.id)
-                extra_note = "\nStored job session cleared."
-            await self.send_html(
-                update,
-                "<b>Schedule updated</b>\n"
-                f"ID: {self._code_inline(updated_job.id)}\n"
-                f"Field: {self._code_inline(field)}\n"
-                f"Value: {self._code_inline(applied_value)}{extra_note}",
-            )
-            return
-
-        if sub in {"pause", "resume", "run", "rm", "delete"}:
-            if not await self._ensure_second_factor(update):
-                return
-            job_id = rest.strip()
-            if not job_id:
-                await self.send_html(update, f"<b>Usage</b>\n<code>/schedule {sub} &lt;job_id&gt;</code>")
-                return
-            job = self.scheduler_store.get_job(chat_id, job_id)
-            if job is None:
-                await self.send_html(update, "<b>Job not found</b>")
-                return
-
-            if sub == "pause":
-                self.scheduler_store.set_enabled(chat_id, job.id, False, job.next_run_at)
-                await self.send_html(update, f"<b>Schedule paused</b>\nID: {self._code_inline(job.id)}")
-                return
-
-            if sub == "resume":
-                now_ts = int(time.time())
-                if job.schedule_type == "once":
-                    if job.next_run_at is None or job.next_run_at <= now_ts:
-                        await self.send_html(update, "<b>Cannot resume</b>\nOne-time schedule is already due or expired.")
-                        return
-                    next_run_at = job.next_run_at
-                else:
-                    try:
-                        _normalized_expr, next_run_at = parse_schedule_spec(job.schedule_type, job.schedule_expr, job.timezone, now_ts)
-                    except ValueError as err:
-                        await self.send_html(update, f"<b>Cannot resume</b>\n{self._code_inline(str(err))}")
-                        return
-                self.scheduler_store.set_enabled(chat_id, job.id, True, next_run_at)
-                await self.send_html(
-                    update,
-                    "<b>Schedule resumed</b>\n"
-                    f"ID: {self._code_inline(job.id)}\n"
-                    f"Next run: {self._code_inline(self._format_timestamp(next_run_at, job.timezone))}",
-                )
-                return
-
-            if sub == "run":
-                try:
-                    run_id = await self.scheduler_service.trigger_job_now(job)
-                except RuntimeError as err:
-                    await self.send_html(update, f"<b>Schedule run blocked</b>\n{self._code_inline(str(err))}")
-                    return
-                await self.send_html(
-                    update,
-                    "<b>Schedule triggered</b>\n"
-                    f"ID: {self._code_inline(job.id)}\n"
-                    f"Run: {self._code_inline(run_id)}",
-                )
-                return
-
-            deleted = self.scheduler_store.delete_job(chat_id, job.id)
-            if not deleted:
-                await self.send_html(update, "<b>Job not found</b>")
-                return
-            await self.send_html(update, f"<b>Schedule removed</b>\nID: {self._code_inline(job.id)}")
-            return
-
-        await self.send_html(update, "<b>Unknown schedule command</b>\nUse <code>/schedule</code> for usage.")
-
     async def _run_prompt(
         self,
         update: Update,
@@ -4042,12 +4162,18 @@ class Bridge:
                 cleaned_output = "[output truncated for safety]\n" + cleaned_output
             final_session_id = self._extract_session_id(cleaned_output) or detected_session_id
             role_ops, visible_output = self._extract_role_ops(cleaned_output)
+            if role_ops and not self._has_role_sync_intent(request.prompt):
+                role_ops = []
             role_sync_summary = self._apply_role_skill_ops(request, role_ops)
             request.role = self._active_role_name(request.chat_id)
+            schedule_ops, visible_output = self._extract_schedule_ops(visible_output)
+            if schedule_ops and not self._has_schedule_sync_intent(request.prompt):
+                schedule_ops = []
+            schedule_sync_summary = await self._apply_schedule_skill_ops(request, schedule_ops)
             memory_ops, visible_output = self._extract_memory_ops(visible_output)
             memory_sync_summary = self._apply_memory_skill_ops(request, memory_ops)
-            if not visible_output:
-                visible_output = "Role or memory updated."
+            if not visible_output and (role_sync_summary or schedule_sync_summary or memory_sync_summary):
+                visible_output = "Role, schedule, or memory updated."
             final_message_id = await _ensure_status_message_id("<i>Finalizing...</i>")
             await self._send_final_output_messages(
                 context=context,
@@ -4082,22 +4208,17 @@ class Bridge:
             if final_session_id:
                 self._set_request_session_id(request, final_session_id)
             self._auto_save_execution_memory(request, visible_output)
+            sync_sections: list[str] = []
             if role_sync_summary:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"<b>Role synced</b>\n{html.escape(role_sync_summary)}",
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                    message_thread_id=thread_id,
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=30,
-                    pool_timeout=5,
-                )
+                sync_sections.append(f"<b>Role synced</b>\n{html.escape(role_sync_summary)}")
+            if schedule_sync_summary:
+                sync_sections.append(f"<b>Schedule synced</b>\n{html.escape(schedule_sync_summary)}")
             if memory_sync_summary:
+                sync_sections.append(f"<b>Memory synced</b>\n{html.escape(memory_sync_summary)}")
+            if sync_sections:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"<b>Memory synced</b>\n{html.escape(memory_sync_summary)}",
+                    text="\n\n".join(sync_sections),
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                     message_thread_id=thread_id,

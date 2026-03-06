@@ -15,7 +15,6 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("new", "Start a fresh Codex session", "<code>/new</code> start a fresh Codex session"),
     CommandSpec("cwd", "Show or change working directory", "<code>/cwd</code> show or change working directory"),
     CommandSpec("skill", "List installed Codex skills", "<code>/skill</code> list installed Codex skills"),
-    CommandSpec("schedule", "Manage scheduled jobs", "<code>/schedule</code> add, inspect, run, pause, resume, or remove jobs"),
     CommandSpec("status", "Show current task status", "<code>/status</code> show current task status"),
     CommandSpec("cancel", "Stop current task", "<code>/cancel</code> stop current task"),
     CommandSpec("id", "Show current chat/user id", "<code>/id</code> show current chat/user id"),
