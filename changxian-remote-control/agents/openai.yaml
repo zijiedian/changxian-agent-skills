@@ -1,0 +1,4 @@
+interface:
+  display_name: "Changxian Remote Control"
+  short_description: "Operate tg-codex remotely over Telegram"
+  default_prompt: "Use changxian-remote-control to operate changxian-agent through the Telegram bridge, including interactive execution, images, settings, and scheduled jobs."
