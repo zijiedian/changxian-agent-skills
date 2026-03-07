@@ -1117,6 +1117,7 @@ class Bridge:
         workdir: str,
         command_prefix: str,
         session_policy: str,
+        exclude_job_id: str = "",
     ) -> Optional[ScheduledJob]:
         signature = (
             self._normalize_schedule_signature_value(schedule_type),
@@ -1130,6 +1131,8 @@ class Bridge:
             self._normalize_schedule_signature_value(session_policy),
         )
         for job in self.scheduler_store.list_jobs(chat_id):
+            if exclude_job_id and job.id == exclude_job_id:
+                continue
             job_signature = (
                 self._normalize_schedule_signature_value(job.schedule_type),
                 self._normalize_schedule_signature_value(job.schedule_expr),
@@ -1382,6 +1385,7 @@ class Bridge:
                     workdir=effective_workdir,
                     command_prefix=effective_command_prefix,
                     session_policy=session_policy,
+                    exclude_job_id="",
                 )
                 if duplicate_job is not None:
                     reused += 1
@@ -1414,10 +1418,67 @@ class Bridge:
                 if target is None:
                     continue
 
+                name_value = None
+                schedule_type_value = None
+                schedule_expr_value = None
+                timezone_value = None
+                prompt_template_value = None
                 role_value = None
                 memory_scope_value = None
                 session_policy_value = None
+                next_run_at_value = None
                 changed_fields: list[str] = []
+
+                if "name" in op or "title" in op or "job_name" in op:
+                    raw_name = str(op.get("name") or op.get("title") or op.get("job_name") or "").strip()
+                    if raw_name and raw_name != target.name:
+                        name_value = raw_name
+                        changed_fields.append("name")
+
+                raw_schedule_type = None
+                if any(key in op for key in ("schedule_type", "type", "kind")):
+                    raw_schedule_type = str(op.get("schedule_type") or op.get("type") or op.get("kind") or "").strip().lower()
+                raw_schedule_expr = None
+                if any(key in op for key in ("schedule_expr", "expr", "schedule")):
+                    raw_schedule_expr = str(op.get("schedule_expr") or op.get("expr") or op.get("schedule") or "").strip()
+                raw_timezone = None
+                if "timezone" in op:
+                    raw_timezone = str(op.get("timezone") or "").strip()
+
+                if raw_schedule_type is not None or raw_schedule_expr is not None or raw_timezone is not None:
+                    effective_schedule_type = raw_schedule_type or target.schedule_type
+                    effective_schedule_expr = raw_schedule_expr or target.schedule_expr
+                    effective_timezone = raw_timezone or target.timezone
+                    try:
+                        normalized_expr, next_run_at = parse_schedule_spec(
+                            effective_schedule_type,
+                            effective_schedule_expr,
+                            effective_timezone,
+                            int(time.time()),
+                        )
+                    except ValueError:
+                        continue
+                    if effective_schedule_type != target.schedule_type:
+                        schedule_type_value = effective_schedule_type
+                        changed_fields.append("schedule_type")
+                    if normalized_expr != target.schedule_expr:
+                        schedule_expr_value = normalized_expr
+                        changed_fields.append("schedule_expr")
+                    if effective_timezone != target.timezone:
+                        timezone_value = effective_timezone
+                        changed_fields.append("timezone")
+                    if (
+                        schedule_type_value is not None
+                        or schedule_expr_value is not None
+                        or timezone_value is not None
+                    ):
+                        next_run_at_value = next_run_at
+
+                if "prompt" in op or "prompt_template" in op or "task" in op:
+                    raw_prompt = str(op.get("prompt") or op.get("prompt_template") or op.get("task") or "").strip()
+                    if raw_prompt and raw_prompt != target.prompt_template:
+                        prompt_template_value = raw_prompt
+                        changed_fields.append("prompt")
 
                 if "role" in op:
                     normalized = str(op.get("role") or "").strip().lower()
@@ -1453,16 +1514,40 @@ class Bridge:
                 if not changed_fields:
                     continue
 
+                duplicate_job = self._find_duplicate_schedule_job(
+                    chat_id=request.chat_id,
+                    schedule_type=schedule_type_value or target.schedule_type,
+                    schedule_expr=schedule_expr_value or target.schedule_expr,
+                    timezone=timezone_value or target.timezone,
+                    prompt_template=prompt_template_value or target.prompt_template,
+                    role=role_value if role_value is not None else target.role,
+                    memory_scope=memory_scope_value or target.memory_scope,
+                    workdir=target.workdir,
+                    command_prefix=target.command_prefix,
+                    session_policy=session_policy_value or target.session_policy,
+                    exclude_job_id=target.id,
+                )
+                if duplicate_job is not None:
+                    reused += 1
+                    change_details.append(f"ignored duplicate update for {duplicate_job.id}")
+                    continue
+
                 updated_job = self.scheduler_store.update_job_fields(
                     request.chat_id,
                     target.id,
+                    name=name_value,
+                    schedule_type=schedule_type_value,
+                    schedule_expr=schedule_expr_value,
+                    timezone=timezone_value,
+                    prompt_template=prompt_template_value,
                     role=role_value,
                     memory_scope=memory_scope_value,
                     session_policy=session_policy_value,
+                    next_run_at=next_run_at_value,
                 )
                 if updated_job is None:
                     continue
-                if session_policy_value == "fresh":
+                if session_policy_value == "fresh" or prompt_template_value is not None:
                     self.scheduler_store.clear_job_session(updated_job.id)
                 updated += 1
                 change_details.append(f"updated {updated_job.id}: {', '.join(changed_fields)}")

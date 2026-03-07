@@ -26,6 +26,7 @@ Use this skill whenever changxian-agent provides a `[SCHEDULE STATE]` block or t
 - Treat `[SCHEDULE STATE]` as the authoritative schedule state for this chat.
 - Prefer concrete schedules (`once`, `every`, `cron`) with explicit expressions.
 - Prefer stable prompts for recurring jobs.
+- When editing an existing job, prefer `set_job` over delete-and-recreate.
 - Avoid no-op schedule operations that do not change job state.
 - If the user request is not about scheduled jobs, never emit a schedule-ops block.
 - If the user only asks to view, list, count, inspect, or explain existing jobs, never emit a schedule-ops block.
@@ -57,9 +58,10 @@ Supported fields:
 - `name`: optional job name (also used for lookup when `job_id` is absent)
 - `query` or `contains`: optional fallback matcher when `job_id` is absent
 - `schedule_type`: `once`, `every`, or `cron` (for `create_job`)
-- `schedule_expr`: schedule expression (for `create_job`)
+- `schedule_expr`: schedule expression (for `create_job` or `set_job`)
 - `timezone`: optional IANA timezone (defaults to host timezone)
-- `prompt` or `prompt_template`: job prompt (for `create_job`)
+- `prompt` or `prompt_template`: job prompt (for `create_job` or `set_job`)
+- `name` or `title`: optional job display name (for `create_job` or `set_job`)
 - `role`: optional role override (`none` to clear)
 - `memory_scope`: optional memory scope override
 - `session_policy`: optional `resume-job` or `fresh`
@@ -77,6 +79,18 @@ User says: “把 job_123 的 role 改成 reviewer。”
 
 ```tg-schedule-ops
 {"ops":[{"op":"set_job","job_id":"job_123","role":"reviewer"}]}
+```
+
+User says: “把 job_123 改成每 6 小时执行一次。”
+
+```tg-schedule-ops
+{"ops":[{"op":"set_job","job_id":"job_123","schedule_type":"every","schedule_expr":"6h"}]}
+```
+
+User says: “把 job_123 的日报 prompt 改一下。”
+
+```tg-schedule-ops
+{"ops":[{"op":"set_job","job_id":"job_123","prompt":"generate a concise AI and security daily brief with clickable source URLs"}]}
 ```
 
 User says: “暂停 job_123。”

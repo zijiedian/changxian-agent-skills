@@ -206,17 +206,38 @@ class SchedulerStore:
         chat_id: int,
         job_id: str,
         *,
+        name: Optional[str] = None,
+        schedule_type: Optional[str] = None,
+        schedule_expr: Optional[str] = None,
+        timezone: Optional[str] = None,
+        prompt_template: Optional[str] = None,
         role: Optional[str] = None,
         memory_scope: Optional[str] = None,
         session_policy: Optional[str] = None,
+        next_run_at: Optional[int] = None,
+        enabled: Optional[bool] = None,
     ) -> Optional[ScheduledJob]:
         updates: dict[str, object] = {}
+        if name is not None:
+            updates["name"] = name.strip()
+        if schedule_type is not None:
+            updates["schedule_type"] = schedule_type.strip()
+        if schedule_expr is not None:
+            updates["schedule_expr"] = schedule_expr.strip()
+        if timezone is not None:
+            updates["timezone"] = timezone.strip()
+        if prompt_template is not None:
+            updates["prompt_template"] = prompt_template.strip()
         if role is not None:
             updates["role"] = role.strip()
         if memory_scope is not None:
             updates["memory_scope"] = memory_scope.strip()
         if session_policy is not None:
             updates["session_policy"] = session_policy.strip()
+        if next_run_at is not None:
+            updates["next_run_at"] = int(next_run_at)
+        if enabled is not None:
+            updates["enabled"] = 1 if enabled else 0
         if not updates:
             return self.get_job(chat_id, job_id)
 
