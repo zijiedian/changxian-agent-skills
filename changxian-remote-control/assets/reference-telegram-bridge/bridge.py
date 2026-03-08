@@ -1950,11 +1950,23 @@ class Bridge:
             return Bridge._code_block(value)
         return f"<pre><code class=\"language-{safe_lang}\">{html.escape(value)}</code></pre>"
 
+    @staticmethod
+    def _looks_like_telegram_html(text: str) -> bool:
+        return bool(re.search(r"</?(?:b|strong|i|em|u|ins|s|strike|del|tg-spoiler|a|code|pre)(?:\s|>|$)", text))
+
+    def _coerce_telegram_html(self, text: str) -> str:
+        stripped = text.strip()
+        if not stripped:
+            return ""
+        if self._looks_like_telegram_html(stripped):
+            return stripped
+        return self._render_preview_html(stripped)
+
     async def send_html(self, update: Update, text: str) -> None:
         if update.effective_message is None:
             return
         await update.effective_message.reply_text(
-            text=text,
+            text=self._coerce_telegram_html(text),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
@@ -1972,7 +1984,7 @@ class Bridge:
         payload: dict[str, str] = {
             "chat_id": str(chat_id),
             "draft_id": str(draft_id),
-            "text": text,
+            "text": self._coerce_telegram_html(text),
             "parse_mode": str(ParseMode.HTML),
         }
         if message_thread_id is not None:
@@ -2139,6 +2151,46 @@ class Bridge:
             sections.append(TraceSection(marker=current_marker, lines=current_lines))
 
         return sections
+
+    @staticmethod
+    def _is_strong_code_line(line: str) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return False
+        if CODE_INDENT_RE.match(line):
+            return True
+        if SHELL_PROMPT_RE.match(line):
+            return True
+        if CODE_KEYWORD_RE.match(stripped):
+            return True
+        if stripped in {"{", "}", "[", "]", "()", "[]", "{}", "};"}:
+            return True
+        return False
+
+    @staticmethod
+    def _line_looks_like_code(line: str) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return False
+        if MARKDOWN_HEADING_RE.match(line) or MARKDOWN_BULLET_RE.match(line) or MARKDOWN_ORDERED_RE.match(line):
+            return False
+        if stripped.startswith(">"):
+            return False
+        if Bridge._is_strong_code_line(line):
+            return True
+
+        token_hits = sum(
+            token in stripped for token in ("{", "}", "=>", "->", "::", "()", "[]", "==", "!=", "<=", ">=", " = ", ";")
+        )
+        if token_hits >= 2:
+            return True
+
+        if stripped.startswith(("SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE ", "ALTER ", "DROP ")):
+            return True
+
+        if stripped.startswith(("git ", "npm ", "pnpm ", "yarn ", "pip ", "python ", "go ", "cargo ", "kubectl ")):
+            return True
+        return False
 
     @staticmethod
     def _is_prose_line(line: str) -> bool:
@@ -2580,80 +2632,47 @@ class Bridge:
 
     @staticmethod
     def _format_inline_markup(text: str) -> str:
-        def render_plain(chunk: str) -> str:
-            escaped = html.escape(chunk)
-            escaped = re.sub(r"\*\*([^\n*]+)\*\*", r"<b>\1</b>", escaped)
-            escaped = re.sub(r"\*([^\n*]+)\*", r"<i>\1</i>", escaped)
-            escaped = re.sub(r"~~([^\n~]+)~~", r"<s>\1</s>", escaped)
-            return escaped
+        code_parts: list[str] = []
+        link_parts: list[str] = []
+        rendered = text
 
-        chunks = re.split(r"(`[^`\n]+`)", text)
-        rendered: list[str] = []
-        for chunk in chunks:
-            if len(chunk) >= 2 and chunk.startswith("`") and chunk.endswith("`"):
-                rendered.append(f"<code>{html.escape(chunk[1:-1])}</code>")
-            else:
-                rendered.append(render_plain(chunk))
-        return "".join(rendered)
+        def stash_code(match: re.Match[str]) -> str:
+            token = f"__CODE_{len(code_parts)}__"
+            code_parts.append(f"<code>{html.escape(match.group(1))}</code>")
+            return token
 
-    @staticmethod
-    def _is_strong_code_line(line: str) -> bool:
-        stripped = line.strip()
-        if not stripped:
-            return False
-        if CODE_INDENT_RE.match(line):
-            return True
-        if SHELL_PROMPT_RE.match(line):
-            return True
-        if CODE_KEYWORD_RE.match(stripped):
-            return True
-        if stripped in {"{", "}", "[", "]", "()", "[]", "{}", "};"}:
-            return True
-        return False
+        def stash_link(match: re.Match[str]) -> str:
+            label = html.escape(match.group(1).strip())
+            url = html.escape(match.group(2).strip(), quote=True)
+            token = f"__LINK_{len(link_parts)}__"
+            link_parts.append(f'<a href="{url}">{label}</a>')
+            return token
 
-    @staticmethod
-    def _line_looks_like_code(line: str) -> bool:
-        stripped = line.strip()
-        if not stripped:
-            return False
-        if MARKDOWN_HEADING_RE.match(line) or MARKDOWN_BULLET_RE.match(line) or MARKDOWN_ORDERED_RE.match(line):
-            return False
-        if stripped.startswith(">"):
-            return False
-        if Bridge._is_strong_code_line(line):
-            return True
+        rendered = re.sub(r"`([^`\n]+)`", stash_code, rendered)
+        rendered = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", stash_link, rendered)
+        rendered = html.escape(rendered)
+        rendered = re.sub(r"\*\*([^\n*]+)\*\*", r"<b>\1</b>", rendered)
+        rendered = re.sub(r"__([^\n_]+)__", r"<u>\1</u>", rendered)
+        rendered = re.sub(r"\*([^\n*]+)\*", r"<i>\1</i>", rendered)
+        rendered = re.sub(r"~~([^\n~]+)~~", r"<s>\1</s>", rendered)
+        rendered = re.sub(r"\|\|([^\n|]+)\|\|", r"<tg-spoiler>\1</tg-spoiler>", rendered)
 
-        token_hits = sum(
-            token in stripped for token in ("{", "}", "=>", "->", "::", "()", "[]", "==", "!=", "<=", ">=", " = ", ";")
-        )
-        if token_hits >= 2:
-            return True
+        for index, snippet in enumerate(link_parts):
+            rendered = rendered.replace(f"__LINK_{index}__", snippet)
+        for index, snippet in enumerate(code_parts):
+            rendered = rendered.replace(f"__CODE_{index}__", snippet)
+        return rendered
 
-        if stripped.startswith(("SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE ", "ALTER ", "DROP ")):
-            return True
-
-        if stripped.startswith(("git ", "npm ", "pnpm ", "yarn ", "pip ", "python ", "go ", "cargo ", "kubectl ")):
-            return True
-        return False
-
-    def _should_start_auto_code_block(self, lines: list[str], index: int) -> bool:
-        if not self._line_looks_like_code(lines[index]):
-            return False
-        if self._is_strong_code_line(lines[index]):
-            return True
-        prev_is_code = index > 0 and self._line_looks_like_code(lines[index - 1])
-        next_is_code = index + 1 < len(lines) and self._line_looks_like_code(lines[index + 1])
-        return prev_is_code or next_is_code
-
-    def _render_preview_html(self, preview: str) -> str:
-        if not preview:
+    def _markdown_to_telegram_html(self, text: str) -> str:
+        if not text:
             return "<i>暂无输出</i>"
 
-        lines = preview.splitlines()
+        lines = text.splitlines()
         html_lines: list[str] = []
         in_code_block = False
         code_lines: list[str] = []
         code_language = ""
+
         for line in lines:
             if in_code_block:
                 if MARKDOWN_FENCE_CLOSE_RE.match(line):
@@ -2702,7 +2721,7 @@ class Bridge:
                 continue
 
             if stripped.startswith(">"):
-                quote_content = stripped.lstrip(">").strip()
+                quote_content = stripped.lstrip("> ").strip()
                 html_lines.append(f"<i>{self._format_inline_markup(quote_content)}</i>")
                 continue
 
@@ -2715,7 +2734,10 @@ class Bridge:
             else:
                 html_lines.append(self._code_block(code_body))
 
-        return "\n".join(html_lines).strip()
+        return "\n".join(html_lines).strip() or "<i>暂无输出</i>"
+
+    def _render_preview_html(self, preview: str) -> str:
+        return self._markdown_to_telegram_html(preview)
 
     def _build_preview(self, output: str, status: str) -> tuple[str, int, int, bool, int]:
         cleaned = self._clean_output(output)
@@ -3240,7 +3262,7 @@ class Bridge:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=text,
+                text=self._coerce_telegram_html(text),
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=disable_web_page_preview,
                 reply_markup=reply_markup,
