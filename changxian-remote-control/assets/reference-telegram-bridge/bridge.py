@@ -2797,14 +2797,14 @@ class Bridge:
         rendered = text
 
         def stash_code(match: re.Match[str]) -> str:
-            token = f"__CODE_{len(code_parts)}__"
+            token = f"@@CODE{len(code_parts)}@@"
             code_parts.append(f"<code>{html.escape(match.group(1))}</code>")
             return token
 
         def stash_link(match: re.Match[str]) -> str:
             label = html.escape(match.group(1).strip())
             url = html.escape(match.group(2).strip(), quote=True)
-            token = f"__LINK_{len(link_parts)}__"
+            token = f"@@LINK{len(link_parts)}@@"
             link_parts.append(f'<a href="{url}">{label}</a>')
             return token
 
@@ -2818,9 +2818,9 @@ class Bridge:
         rendered = re.sub(r"\|\|([^\n|]+)\|\|", r"<tg-spoiler>\1</tg-spoiler>", rendered)
 
         for index, snippet in enumerate(link_parts):
-            rendered = rendered.replace(f"__LINK_{index}__", snippet)
+            rendered = rendered.replace(f"@@LINK{index}@@", snippet)
         for index, snippet in enumerate(code_parts):
-            rendered = rendered.replace(f"__CODE_{index}__", snippet)
+            rendered = rendered.replace(f"@@CODE{index}@@", snippet)
         return rendered
 
     def _markdown_to_telegram_html(self, text: str) -> str:
