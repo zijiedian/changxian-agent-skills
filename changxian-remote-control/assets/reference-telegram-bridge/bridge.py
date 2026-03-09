@@ -26,12 +26,20 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from bot_commands import start_help_lines
-from codex_runner import _validate_codex_prefix, run_codex_stream
+from codex_runner import (
+    _is_opencode_prefix,
+    _validate_codex_prefix,
+    _validate_command_prefix,
+    _validate_opencode_prefix,
+    run_codex_stream,
+)
 from constants import (
     ANSI_ESCAPE_RE,
     CODE_INDENT_RE,
     CODE_KEYWORD_RE,
+    CONFIG_CONTEXT_NOISE_RE,
     DEFAULT_AUTH_TTL_SECONDS,
+    DEFAULT_CODEX_COMMAND_PREFIX,
     DIFF_HEADER_RE,
     EDIT_THROTTLE_SECONDS,
     FINAL_OUTPUT_CHUNK_LIMIT,
@@ -45,6 +53,7 @@ from constants import (
     MARKDOWN_RULE_RE,
     MIN_AUTH_PASSPHRASE_LENGTH,
     OUTPUT_FILE_MIN_CHARS,
+    OPENCODE_PROJECT_PATH_PLACEHOLDER,
     PAGE_SESSION_TTL_SECONDS,
     PATCH_ADD_PREFIX,
     PATCH_BEGIN_MARKER,
@@ -69,6 +78,7 @@ from constants import (
     THINKING_SPINNER_FRAMES,
     TRACE_SECTION_MARKERS,
     TRACE_SKIP_SECTION_MARKERS,
+    OPENCODE_COMMAND_PREFIX,
 )
 from memory_store import MemoryRecord, MemoryStore
 from scheduler import ScheduledJob, SchedulerService, SchedulerStore, parse_schedule_spec
@@ -129,6 +139,7 @@ class ExecutionResult:
     summary: str = ""
     error_text: str = ""
     output_file: str = ""
+    diagnostic_file: str = ""
     session_id: str = ""
     status_message_id: Optional[int] = None
     skipped: bool = False
@@ -192,16 +203,19 @@ SCHEDULE_SYNC_SCHEDULE_RE = re.compile(
 SCHEDULE_SYNC_READONLY_RE = re.compile(
     r"(?i)(?:查看|显示|列出|罗列|详情|细节|状态|有哪些|show|display|list|detail|details|status|inspect)"
 )
+MEMORY_SYNC_INTENT_RE = re.compile(
+    r"(?i)(?:/memory\b|\bmemory\b|remember|forget|saved memory|记忆|记住|忘记|遗忘)"
+)
 
 
 class Bridge:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.tasks: Dict[int, asyncio.Task] = {}
-        self.default_codex_prefix = settings.codex_command_prefix
-        self.codex_prefix = settings.codex_command_prefix
+        self.default_command_prefix = settings.codex_command_prefix
         self.recent_requests: Dict[tuple[int, int], float] = {}
         self.auth_sessions: Dict[tuple[int, int], float] = {}
+        self.skill_body_cache: Dict[str, tuple[Path, int, str]] = {}
         runtime_dir = runtime_base_dir()
         state_dir = ensure_state_base_dir()
         self.media_dir = runtime_dir / "incoming_media"
@@ -210,14 +224,17 @@ class Bridge:
         self.env_path = state_dir / ".env"
         self.sessions_path = state_dir / "chat_sessions.json"
         self.workdirs_path = state_dir / "chat_workdirs.json"
+        self.command_prefixes_path = state_dir / "chat_command_prefixes.json"
         self.roles_path = state_dir / "chat_roles.json"
         self.page_sessions_path = state_dir / "page_sessions.json"
         self.state_db_path = state_dir / "agent_state.sqlite3"
+        self.diagnostics_dir = state_dir / "diagnostics"
         self.resource_dir = resource_base_dir()
         self.project_skills_dir = self.resource_dir / "changxian-agent-skills"
         self._ensure_default_roles()
         self.chat_sessions: Dict[int, str] = self._load_chat_sessions()
         self.chat_workdirs: Dict[int, str] = self._load_chat_workdirs()
+        self.chat_command_prefixes: Dict[int, str] = self._load_chat_command_prefixes()
         self.chat_roles: Dict[int, str] = self._load_chat_roles()
         self.page_sessions: Dict[tuple[int, int], PageSession] = self._load_page_sessions()
         self.memory_store = MemoryStore(self.state_db_path)
@@ -227,6 +244,12 @@ class Bridge:
         self.scheduler_store.initialize()
         self.scheduler_service = SchedulerService(self, self.scheduler_store, settings)
         self.application = None
+
+    def _default_workdir(self) -> Path:
+        return Path(self.settings.default_workdir)
+
+    def _default_command_prefix_for_chat(self, _: int) -> str:
+        return self.default_command_prefix
 
     def _load_chat_sessions(self) -> Dict[int, str]:
         if not self.sessions_path.exists():
@@ -329,6 +352,31 @@ class Bridge:
                 continue
             workdirs[chat_id] = normalized
         return workdirs
+
+    def _load_chat_command_prefixes(self) -> Dict[int, str]:
+        if not self.command_prefixes_path.exists():
+            return {}
+        try:
+            raw = json.loads(self.command_prefixes_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+
+        command_prefixes: Dict[int, str] = {}
+        for chat_key, prefix in raw.items():
+            if not isinstance(chat_key, str) or not isinstance(prefix, str):
+                continue
+            normalized = prefix.strip()
+            if not normalized:
+                continue
+            try:
+                chat_id = int(chat_key)
+                _validate_command_prefix(normalized)
+            except (ValueError, TypeError):
+                continue
+            command_prefixes[chat_id] = normalized
+        return command_prefixes
 
     def _ensure_default_roles(self) -> None:
         self.roles_dir.mkdir(parents=True, exist_ok=True)
@@ -483,6 +531,17 @@ class Bridge:
         except OSError:
             pass
 
+    def _save_chat_command_prefixes(self) -> None:
+        payload = {str(chat_id): prefix for chat_id, prefix in self.chat_command_prefixes.items()}
+        self.command_prefixes_path.write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(self.command_prefixes_path, 0o600)
+        except OSError:
+            pass
+
     def _load_page_sessions(self) -> Dict[tuple[int, int], PageSession]:
         if not self.page_sessions_path.exists():
             return {}
@@ -631,6 +690,27 @@ class Bridge:
         self.chat_workdirs[chat_id] = str(workdir)
         self._save_chat_workdirs()
 
+    def _get_chat_command_prefix(self, chat_id: int) -> str:
+        raw = self.chat_command_prefixes.get(chat_id, "").strip()
+        if raw:
+            return raw
+        return self._default_command_prefix_for_chat(chat_id)
+
+    def _set_chat_command_prefix(self, chat_id: int, command_prefix: str) -> None:
+        normalized = command_prefix.strip()
+        if not normalized or normalized == self._default_command_prefix_for_chat(chat_id):
+            self.chat_command_prefixes.pop(chat_id, None)
+        else:
+            self.chat_command_prefixes[chat_id] = normalized
+        self._save_chat_command_prefixes()
+
+    def _clear_chat_command_prefix(self, chat_id: int) -> bool:
+        existed = chat_id in self.chat_command_prefixes
+        if existed:
+            self.chat_command_prefixes.pop(chat_id, None)
+            self._save_chat_command_prefixes()
+        return existed
+
     def _clear_chat_workdir(self, chat_id: int) -> bool:
         existed = chat_id in self.chat_workdirs
         if existed:
@@ -642,7 +722,7 @@ class Bridge:
         normalized = raw_path.strip()
         if not normalized:
             raise ValueError("directory path cannot be empty")
-        base = self._get_chat_workdir(chat_id) or runtime_base_dir()
+        base = self._get_chat_workdir(chat_id) or self._default_workdir()
         candidate = Path(normalized).expanduser()
         target = candidate if candidate.is_absolute() else (base / candidate)
         resolved = target.resolve()
@@ -653,7 +733,35 @@ class Bridge:
         return resolved
 
     def _effective_workdir(self, chat_id: int) -> Path:
-        return self._get_chat_workdir(chat_id) or runtime_base_dir()
+        return self._get_chat_workdir(chat_id) or self._default_workdir()
+
+    @staticmethod
+    def _opencode_parts_with_workdir(parts: list[str], workdir: Path) -> list[str]:
+        resolved = list(parts)
+        dir_idx = resolved.index("--dir")
+        if dir_idx + 1 >= len(resolved):
+            raise ValueError("command prefix must provide a directory after --dir")
+        if resolved[dir_idx + 1] == OPENCODE_PROJECT_PATH_PLACEHOLDER:
+            resolved[dir_idx + 1] = str(workdir)
+        return resolved
+
+    def _command_backend(self, command_prefix: str) -> str:
+        return "opencode" if _is_opencode_prefix(command_prefix) else "codex"
+
+    def _display_command_prefix(self, chat_id: int, command_prefix: str) -> str:
+        prefix = command_prefix.strip()
+        if not prefix:
+            return ""
+        if self._command_backend(prefix) != "opencode":
+            return self._redacted_command_text(prefix)
+        try:
+            parts = self._opencode_parts_with_workdir(
+                _validate_opencode_prefix(prefix),
+                self._effective_workdir(chat_id),
+            )
+        except ValueError:
+            return self._redacted_command_text(prefix)
+        return self._redacted_command_text(shlex.join(parts))
 
     @staticmethod
     def _skills_root_dir() -> Path:
@@ -714,10 +822,21 @@ class Bridge:
             return ""
         skill_path = skill_dir / "SKILL.md"
         try:
+            stat = skill_path.stat()
+        except OSError:
+            return ""
+        cached = self.skill_body_cache.get(skill_name)
+        if cached is not None:
+            cached_path, cached_mtime_ns, cached_body = cached
+            if cached_path == skill_path and cached_mtime_ns == stat.st_mtime_ns:
+                return cached_body
+        try:
             content = skill_path.read_text(encoding="utf-8")
         except OSError:
             return ""
-        return self._strip_frontmatter(content)
+        body = self._strip_frontmatter(content)
+        self.skill_body_cache[skill_name] = (skill_path, stat.st_mtime_ns, body)
+        return body
 
     @staticmethod
     def _parse_skill_frontmatter(text: str) -> tuple[str, str]:
@@ -823,10 +942,20 @@ class Bridge:
         return cmd
 
     def _resolve_codex_command_for_request(self, request: ExecutionRequest, prompt: str) -> tuple[list[str], str, Path]:
-        prefix = request.command_prefix or self.codex_prefix
-        base = _validate_codex_prefix(prefix)
+        prefix = request.command_prefix or self._get_chat_command_prefix(request.chat_id)
         workdir = request.workdir or self._effective_workdir(request.chat_id)
         session_id = self._get_request_session_id(request)
+
+        if self._command_backend(prefix) == "opencode":
+            parts = _validate_opencode_prefix(prefix)
+            parts = self._opencode_parts_with_workdir(parts, workdir)
+            if parts[0] == "opencode":
+                opencode_path = Path("~/.opencode/bin/opencode").expanduser()
+                if opencode_path.exists():
+                    parts[0] = str(opencode_path)
+            return parts + [prompt], "", workdir
+
+        base = _validate_codex_prefix(prefix)
         if request.session_mode != "fresh" and session_id:
             resume_cmd = self._build_resume_command(base, session_id, prompt)
             if resume_cmd is not None:
@@ -987,15 +1116,29 @@ class Bridge:
             return prompt, []
 
         sections: list[str] = []
-        remote_skill_body = self._read_skill_body(REMOTE_CONTROL_SKILL_NAME)
-        if remote_skill_body:
+        compact_context = self._is_opencode_request(request)
+        role_sync_intent = self._has_role_sync_intent(prompt)
+        memory_sync_intent = self._has_memory_sync_intent(prompt)
+        schedule_sync_intent = request.source == "schedule" or self._has_schedule_sync_intent(prompt)
+
+        if compact_context:
             sections.append(
-                "[REMOTE CONTROL SKILL]\n"
-                f"Skill name: {REMOTE_CONTROL_SKILL_NAME}\n"
-                "The following skill is preloaded by changxian-agent for host-bridge remote control and scheduled execution. Adapt it to the active host capabilities and control surface.\n\n"
-                + remote_skill_body
+                "[REMOTE HOST]\n"
+                "Running through Telegram remote control. Keep progress concise and action-oriented. "
+                "Only emit tg-role-ops, tg-memory-ops, or tg-schedule-ops blocks when the user explicitly asks to change roles, memory, or schedules."
             )
-        role_skill_body = self._read_skill_body(ROLE_SKILL_NAME)
+        else:
+            remote_skill_body = self._read_skill_body(REMOTE_CONTROL_SKILL_NAME)
+            if remote_skill_body:
+                sections.append(
+                    "[REMOTE CONTROL SKILL]\n"
+                    f"Skill name: {REMOTE_CONTROL_SKILL_NAME}\n"
+                    "The following skill is preloaded by changxian-agent for host-bridge remote control and scheduled execution. Adapt it to the active host capabilities and control surface.\n\n"
+                    + remote_skill_body
+                )
+        role_skill_body = ""
+        if (not compact_context) or role_sync_intent:
+            role_skill_body = self._read_skill_body(ROLE_SKILL_NAME)
         if role_skill_body:
             sections.append(
                 "[ROLE SKILL]\n"
@@ -1003,11 +1146,12 @@ class Bridge:
                 "The following skill is preloaded by changxian-agent for role management. Follow it when creating, updating, selecting, or clearing reusable roles.\n\n"
                 + role_skill_body
             )
-        sections.append(
-            "[ROLE STATE]\n"
-            "This role state is loaded at conversation init and refreshed on each turn.\n"
-            + self._format_role_state(request.chat_id)
-        )
+        if not compact_context or role_sync_intent:
+            sections.append(
+                "[ROLE STATE]\n"
+                "This role state is loaded at conversation init and refreshed on each turn.\n"
+                + self._format_role_state(request.chat_id)
+            )
 
         if request.role:
             role_name = request.role.strip().lower()
@@ -1019,14 +1163,18 @@ class Bridge:
 
         memories: list[MemoryRecord] = []
         if self.settings.enable_memory:
-            skill_body = self._read_skill_body(MEMORY_SKILL_NAME)
             scopes = self._ordered_memory_scopes(request)
-            memories = self.memory_store.search_memories(
-                chat_id=request.chat_id,
-                scopes=scopes,
-                query="",
-                limit=self.settings.memory_max_items,
-            )
+            include_memory_context = (not compact_context) or memory_sync_intent or request.source == "schedule"
+            if include_memory_context:
+                memories = self.memory_store.search_memories(
+                    chat_id=request.chat_id,
+                    scopes=scopes,
+                    query="",
+                    limit=self.settings.memory_max_items,
+                )
+            skill_body = ""
+            if include_memory_context and ((not compact_context) or memory_sync_intent):
+                skill_body = self._read_skill_body(MEMORY_SKILL_NAME)
             if skill_body:
                 sections.append(
                     "[MEMORY SKILL]\n"
@@ -1034,13 +1182,14 @@ class Bridge:
                     "The following skill is preloaded by changxian-agent for this conversation. Follow it exactly when using or updating memory.\n\n"
                     + skill_body
                 )
-            sections.append(
-                "[MEMORY STATE]\n"
-                "This memory state is loaded at conversation init and refreshed on each turn. Use it as the authoritative saved context for this chat.\n"
-                + self._format_memory_state(memories)
-            )
+            if include_memory_context and memories:
+                sections.append(
+                    "[MEMORY STATE]\n"
+                    "This memory state is loaded at conversation init and refreshed on each turn. Use it as the authoritative saved context for this chat.\n"
+                    + self._format_memory_state(memories)
+                )
 
-        if self.settings.enable_scheduler:
+        if self.settings.enable_scheduler and ((not compact_context) or schedule_sync_intent):
             skill_body = self._read_skill_body(SCHEDULE_SKILL_NAME)
             if skill_body:
                 sections.append(
@@ -1099,6 +1248,16 @@ class Bridge:
         if SCHEDULE_SYNC_READONLY_RE.search(text):
             return False
         return bool(SCHEDULE_SYNC_SCHEDULE_RE.search(text))
+
+    @staticmethod
+    def _has_memory_sync_intent(prompt: str) -> bool:
+        return bool(MEMORY_SYNC_INTENT_RE.search(prompt or ""))
+
+    def _is_opencode_request(self, request: ExecutionRequest) -> bool:
+        prefix = (request.command_prefix or self._get_chat_command_prefix(request.chat_id) or "").strip()
+        if not prefix:
+            return False
+        return self._command_backend(prefix) == "opencode"
 
     @staticmethod
     def _normalize_schedule_signature_value(raw_value: object) -> str:
@@ -1372,7 +1531,7 @@ class Bridge:
                 session_policy = self._normalize_schedule_session_policy(str(op.get("session_policy") or "resume-job")) or "resume-job"
                 name = str(op.get("name") or "").strip() or self._truncate_text(prompt_text.splitlines()[0].strip() or "scheduled task", limit=48)
                 effective_workdir = str(request.workdir or self._effective_workdir(request.chat_id))
-                effective_command_prefix = request.command_prefix or self.codex_prefix
+                effective_command_prefix = request.command_prefix or self._get_chat_command_prefix(request.chat_id)
 
                 duplicate_job = self._find_duplicate_schedule_job(
                     chat_id=request.chat_id,
@@ -2026,13 +2185,14 @@ class Bridge:
 
         await asyncio.to_thread(_post)
 
-    @staticmethod
-    def _clean_output(output: str) -> str:
+    def _clean_output(self, output: str) -> str:
         text = ANSI_ESCAPE_RE.sub("", output).replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
         lines = text.splitlines()
         compact: list[str] = []
         previous: Optional[str] = None
         for line in lines:
+            if CONFIG_CONTEXT_NOISE_RE.match(line.strip()):
+                continue
             if line == previous:
                 continue
             compact.append(line)
@@ -3134,10 +3294,8 @@ class Bridge:
 
     def _render_paginated_html(self, content: str, index: int, total: int) -> str:
         page_html = self._render_preview_html(content)
-        if total <= 1:
-            return page_html
-        indicator = f"<i>Page {index + 1}/{total}</i>"
-        return f"{indicator}\n{page_html}" if page_html else indicator
+        # 去掉 Page X/Y 提示，但保留翻页按钮功能
+        return page_html
 
     async def _send_final_output_messages(
         self,
@@ -3200,6 +3358,10 @@ class Bridge:
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         return f"codex-output-{chat_id}-{message_id}-{timestamp}.txt"
 
+    def _diagnostic_file_name(self, chat_id: int) -> str:
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        return f"task-diagnostic-{chat_id}-{timestamp}.log"
+
     def _should_upload_output_file(self, cleaned_output: str) -> bool:
         if not self.settings.enable_output_file:
             return False
@@ -3224,6 +3386,59 @@ class Bridge:
         except OSError:
             pass
         return output_path
+
+    def _write_failure_diagnostic(
+        self,
+        request: ExecutionRequest,
+        prepared_prompt: str,
+        cmd_args: list[str],
+        workdir: Path,
+        output: str,
+        err: Exception,
+    ) -> Path:
+        self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.diagnostics_dir, 0o700)
+        except OSError:
+            pass
+
+        path = self.diagnostics_dir / self._diagnostic_file_name(request.chat_id)
+        cleaned_output = self._clean_output(output)
+        lines = [
+            f"timestamp: {datetime.now().isoformat()}",
+            f"source: {request.source}",
+            f"chat_id: {request.chat_id}",
+            f"thread_id: {request.thread_id}",
+            f"role: {request.role or '(none)'}",
+            f"session_mode: {request.session_mode}",
+            f"memory_scope: {request.memory_scope or '(none)'}",
+            f"workdir: {workdir}",
+            f"command: {self._redacted_command_text(shlex.join(cmd_args))}",
+            f"error: {err}",
+            f"prepared_prompt_chars: {len(prepared_prompt)}",
+            "",
+            "--- prepared prompt ---",
+            prepared_prompt,
+            "",
+            "--- captured output ---",
+            cleaned_output or "(empty output)",
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return path
+
+    def _error_output_excerpt(self, output: str) -> str:
+        cleaned = self._clean_output(output)
+        if not cleaned:
+            return ""
+        lines = [line for line in cleaned.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        excerpt = "\n".join(lines[-12:])
+        return clip_for_telegram(excerpt, limit=900)
 
     async def _upload_output_file(
         self,
@@ -3286,10 +3501,18 @@ class Bridge:
             return
         auth_status = "ON" if self._is_second_factor_enabled() else "OFF"
         commands_markup = "\n".join(start_help_lines())
+        run_mode_line = "Send plain text directly to execute a task.\n\n" if self.settings.allow_plain_text else "\n"
+        plain_text_mode_line = (
+            " (all non-<code>/xxx</code> text will run as prompt)."
+            if self.settings.allow_plain_text
+            else " (use <code>/run</code> instead)."
+        )
         await self.send_html(
             update,
             "<b>remote-control</b>\n"
-            "Send plain text directly to execute a task.\n\n"
+            "Use <code>/run &lt;prompt&gt;</code> to execute a task.\n"
+            + run_mode_line
+            +
             "Send an image (optional caption) to run an image prompt.\n\n"
             "<b>Commands</b>\n"
             f"{commands_markup}"
@@ -3298,7 +3521,8 @@ class Bridge:
             "\nMemory: <b>skill-managed</b> via <code>changxian-memory-manager</code>"
             "\nRole: <b>skill-managed</b> via <code>changxian-role-manager</code>"
             "\nSchedule: <b>skill-managed</b> via <code>changxian-schedule</code>"
-            "\n\nPlain text mode: <b>ON</b> (all non-<code>/xxx</code> text will run as prompt).",
+            f"\n\nPlain text mode: <b>{'ON' if self.settings.allow_plain_text else 'OFF'}</b>"
+            + plain_text_mode_line,
         )
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3321,37 +3545,48 @@ class Bridge:
         session_id = self.chat_sessions.get(chat_id, "")
         session_text = self._code_inline(session_id) if session_id else "<code>(new)</code>"
         workdir_text = self._code_inline(str(self._effective_workdir(chat_id)))
-        display_prefix = self._redacted_command_text(self.codex_prefix)
+        command_prefix = self._get_chat_command_prefix(chat_id)
+        backend = self._command_backend(command_prefix)
+        display_prefix = self._display_command_prefix(chat_id, command_prefix)
         if self._is_second_factor_enabled():
             auth_left = self._auth_seconds_left(update)
             auth_state = f"authenticated ({auth_left}s left)" if auth_left > 0 else "locked"
         else:
             auth_state = "disabled"
+        plain_text_mode = "enabled" if self.settings.allow_plain_text else "disabled"
+        if backend == "opencode":
+            resume_text = "<b>unsupported on OpenCode</b>"
+            session_line = f"Saved Codex session: {session_text}"
+        else:
+            resume_text = f"<b>{resume_mode}</b>"
+            session_line = f"Session: {session_text}"
         if task and not task.done():
             await self.send_html(
                 update,
                 "<b>Task Status</b>\n"
                 "State: <b>Running</b>\n"
+                f"Backend: <b>{backend.upper()}</b>\n"
                 f"Command:\n{self._code_block(display_prefix)}\n"
                 f"Workdir: {workdir_text}\n"
-                f"Plain text mode: <b>{mode}</b>\n"
+                f"Plain text mode: <b>{plain_text_mode}</b>\n"
                 f"Output file upload: <b>{output_file_mode}</b>\n"
-                f"Session resume: <b>{resume_mode}</b>\n"
+                f"Session resume: {resume_text}\n"
                 f"Second-factor: <b>{auth_state}</b>\n"
-                f"Session: {session_text}",
+                + session_line,
             )
         else:
             await self.send_html(
                 update,
                 "<b>Task Status</b>\n"
                 "State: <b>Idle</b>\n"
+                f"Backend: <b>{backend.upper()}</b>\n"
                 f"Command:\n{self._code_block(display_prefix)}\n"
                 f"Workdir: {workdir_text}\n"
-                f"Plain text mode: <b>{mode}</b>\n"
+                f"Plain text mode: <b>{plain_text_mode}</b>\n"
                 f"Output file upload: <b>{output_file_mode}</b>\n"
-                f"Session resume: <b>{resume_mode}</b>\n"
+                f"Session resume: {resume_text}\n"
                 f"Second-factor: <b>{auth_state}</b>\n"
-                f"Session: {session_text}",
+                + session_line,
             )
 
     async def paginate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3503,15 +3738,28 @@ class Bridge:
             return
 
         existed = self._clear_chat_session(chat_id)
+        backend = self._command_backend(self._get_chat_command_prefix(chat_id))
+        if backend == "opencode":
+            if existed:
+                await self.send_html(
+                    update,
+                    "<b>OpenCode is stateless</b>\nCleared the saved Codex session for this chat.",
+                )
+            else:
+                await self.send_html(
+                    update,
+                    "<b>OpenCode is stateless</b>\nNo saved Codex session was stored for this chat.",
+                )
+            return
         if existed:
             await self.send_html(
                 update,
-                "<b>Session reset</b>\nNext plain text message will start a fresh Codex session.",
+                "<b>Session reset</b>\nNext prompt will start a fresh Codex session.",
             )
             return
         await self.send_html(
             update,
-            "<b>Already fresh</b>\nNo previous session found. Next plain text message will start a fresh Codex session.",
+            "<b>Already fresh</b>\nNo previous session found. Next prompt will start a fresh Codex session.",
         )
 
     async def cwd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3663,6 +3911,12 @@ class Bridge:
     async def run_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_message is None:
             return
+        if not self.settings.allow_plain_text:
+            await self.send_html(
+                update,
+                "<b>Plain text mode disabled</b>\nUse <code>/run &lt;prompt&gt;</code> instead.",
+            )
+            return
         prompt = (update.effective_message.text or "").strip()
         if not prompt:
             return
@@ -3757,6 +4011,7 @@ class Bridge:
         low_prefix = "codex -a never --search exec -s workspace-write --skip-git-repo-check"
         readonly_prefix = "codex -a never --search exec -s read-only --skip-git-repo-check"
         high_prefix = "codex -a never --search exec -s danger-full-access --skip-git-repo-check"
+        chat_id = update.effective_chat.id
         preset_aliases = {
             "low": ("LOW", low_prefix),
             "readonly": ("READONLY", readonly_prefix),
@@ -3766,19 +4021,22 @@ class Bridge:
 
         raw = " ".join(context.args).strip()
         if not raw:
-            display_prefix = self._redacted_command_text(self.codex_prefix)
+            display_prefix = self._display_command_prefix(chat_id, self._get_chat_command_prefix(chat_id))
             await self.send_html(
                 update,
-                "<b>Current command prefix</b>\n"
+                "<b>Current command prefix for this chat</b>\n"
                 f"{self._code_block(display_prefix)}\n"
                 "<b>Permission profiles</b>\n"
                 f"LOW (recommended): {self._code_inline(low_prefix)}\n"
                 f"READONLY (audit/review): {self._code_inline(readonly_prefix)}\n"
                 f"HIGH (danger-full-access): {self._code_inline(high_prefix)}\n\n"
+                "<b>OpenCode backend</b>\n"
+                f"{self._code_inline(OPENCODE_COMMAND_PREFIX)}\n\n"
                 "<b>Usage</b>\n"
                 "<code>/cmd &lt;command prefix&gt;</code>\n"
                 "<code>/cmd low</code> / <code>/cmd readonly</code> / <code>/cmd high</code>\n"
                 "<code>/cmd reset</code>\n"
+                "<code>/cmd opencode run --dir &lt;PROJECT_PATH&gt; -m opencode/minimax-m2.5-free</code>\n\n"
                 f"Override enabled: <b>{'yes' if self.settings.allow_cmd_override else 'no'}</b>",
             )
             return
@@ -3787,11 +4045,11 @@ class Bridge:
             return
 
         if raw.lower() == "reset":
-            self.codex_prefix = self.default_codex_prefix
-            display_prefix = self._redacted_command_text(self.codex_prefix)
+            self._clear_chat_command_prefix(chat_id)
+            display_prefix = self._display_command_prefix(chat_id, self._get_chat_command_prefix(chat_id))
             await self.send_html(
                 update,
-                "<b>Command prefix reset</b>\n"
+                "<b>Command prefix reset for this chat</b>\n"
                 f"{self._code_block(display_prefix)}",
             )
             return
@@ -3799,25 +4057,25 @@ class Bridge:
         preset = preset_aliases.get(raw.lower())
         if preset is not None:
             level, preset_prefix = preset
-            self.codex_prefix = preset_prefix
-            display_prefix = self._redacted_command_text(self.codex_prefix)
+            self._set_chat_command_prefix(chat_id, preset_prefix)
+            display_prefix = self._display_command_prefix(chat_id, self._get_chat_command_prefix(chat_id))
             await self.send_html(
                 update,
-                f"<b>Command prefix switched to {level}</b>\n"
+                f"<b>Command prefix switched to {level} for this chat</b>\n"
                 f"{self._code_block(display_prefix)}",
             )
             return
 
         try:
-            _validate_codex_prefix(raw)
+            _validate_command_prefix(raw)
         except ValueError as err:
             await self.send_html(update, f"<b>Invalid command prefix</b>\n{self._code_inline(str(err))}")
             return
-        self.codex_prefix = raw
-        display_prefix = self._redacted_command_text(self.codex_prefix)
+        self._set_chat_command_prefix(chat_id, raw)
+        display_prefix = self._display_command_prefix(chat_id, self._get_chat_command_prefix(chat_id))
         await self.send_html(
             update,
-            "<b>Command prefix updated</b>\n"
+            "<b>Command prefix updated for this chat</b>\n"
             f"{self._code_block(display_prefix)}",
         )
 
@@ -3842,6 +4100,7 @@ class Bridge:
                 f"TG_ENABLE_OUTPUT_FILE: <b>{output_mode}</b>\n"
                 f"TG_AUTH_TTL_SECONDS: <code>{self.settings.auth_ttl_seconds}s</code>\n"
                 f"TG_ENABLE_SESSION_RESUME: <b>{resume_mode}</b>\n"
+                f"TG_ALLOW_PLAIN_TEXT: <b>{'enabled' if self.settings.allow_plain_text else 'disabled'}</b>\n"
                 f"TG_ENABLE_MEMORY: <b>{memory_mode}</b>\n"
                 f"TG_ENABLE_SCHEDULER: <b>{scheduler_mode}</b>\n"
                 f"Env file: {self._code_inline(str(self.env_path))}\n\n"
@@ -3849,6 +4108,7 @@ class Bridge:
                 "<code>/setting output_file on|off</code>\n"
                 "<code>/setting auth_ttl 7d</code>\n"
                 "<code>/setting session_resume on|off</code>\n"
+                "<code>/setting plain_text on|off</code>\n"
                 "<code>/setting memory on|off</code>\n"
                 "<code>/setting scheduler on|off</code>",
             )
@@ -3861,6 +4121,7 @@ class Bridge:
                 "<code>/setting output_file on|off</code>\n"
                 "<code>/setting auth_ttl 7d</code>\n"
                 "<code>/setting session_resume on|off</code>\n"
+                "<code>/setting plain_text on|off</code>\n"
                 "<code>/setting memory on|off</code>\n"
                 "<code>/setting scheduler on|off</code>",
             )
@@ -3878,6 +4139,8 @@ class Bridge:
             "tg_auth_ttl_seconds": "TG_AUTH_TTL_SECONDS",
             "session_resume": "TG_ENABLE_SESSION_RESUME",
             "tg_enable_session_resume": "TG_ENABLE_SESSION_RESUME",
+            "plain_text": "TG_ALLOW_PLAIN_TEXT",
+            "tg_allow_plain_text": "TG_ALLOW_PLAIN_TEXT",
             "memory": "TG_ENABLE_MEMORY",
             "tg_enable_memory": "TG_ENABLE_MEMORY",
             "scheduler": "TG_ENABLE_SCHEDULER",
@@ -3889,7 +4152,7 @@ class Bridge:
                 update,
                 "<b>Unknown setting key</b>\n"
                 f"Received: {self._code_inline(key_raw)}\n"
-                "Supported keys: <code>output_file</code>, <code>auth_ttl</code>, <code>session_resume</code>, <code>memory</code>, <code>scheduler</code>.",
+                "Supported keys: <code>output_file</code>, <code>auth_ttl</code>, <code>session_resume</code>, <code>plain_text</code>, <code>memory</code>, <code>scheduler</code>.",
             )
             return
 
@@ -3921,6 +4184,8 @@ class Bridge:
                 self.settings.enable_output_file = toggle
             elif env_key == "TG_ENABLE_SESSION_RESUME":
                 self.settings.enable_session_resume = toggle
+            elif env_key == "TG_ALLOW_PLAIN_TEXT":
+                self.settings.allow_plain_text = toggle
             elif env_key == "TG_ENABLE_MEMORY":
                 self.settings.enable_memory = toggle
             elif env_key == "TG_ENABLE_SCHEDULER":
@@ -3939,6 +4204,72 @@ class Bridge:
             f"{self._code_inline(env_key)} = <code>{html.escape(updates[env_key])}</code>\n"
             f"Applied: <b>{html.escape(applied_value)}</b>",
         )
+
+    async def backend(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Switch between Codex and OpenCode backend"""
+        if update.effective_chat is None or update.effective_message is None:
+            return
+        if not self._is_update_authorized(update, require_admin=True):
+            await self.send_html(update, "<b>Access denied</b>")
+            return
+        if not await self._ensure_second_factor(update):
+            return
+
+        raw = " ".join(context.args).strip().lower() if context.args else ""
+        chat_id = update.effective_chat.id
+        current_prefix = self._get_chat_command_prefix(chat_id)
+        current_backend = self._command_backend(current_prefix)
+        
+        if not raw or raw == "status":
+            await self.send_html(
+                update,
+                "<b>Current backend</b>\n"
+                f"{current_backend.upper()}\n\n"
+                "<b>Usage</b>\n"
+                "<code>/backend codex</code> - switch to Codex backend\n"
+                "<code>/backend opencode</code> - switch to OpenCode backend\n"
+                "<code>/backend status</code> - show current backend\n\n"
+                "<b>Note</b>: OpenCode runs with <code>run --dir &lt;PROJECT_PATH&gt; -m opencode/minimax-m2.5-free</code> and resolves the current workdir at execution time.",
+            )
+            return
+
+        if not self.settings.allow_cmd_override:
+            await self.send_html(update, "<b>Backend switch disabled</b>\nSet <code>TG_ALLOW_CMD_OVERRIDE=1</code> to enable.")
+            return
+
+        if raw == "codex":
+            codex_prefix = self.default_command_prefix
+            if self._command_backend(codex_prefix) != "codex":
+                codex_prefix = DEFAULT_CODEX_COMMAND_PREFIX
+            self._set_chat_command_prefix(chat_id, codex_prefix)
+            display_prefix = self._display_command_prefix(chat_id, self._get_chat_command_prefix(chat_id))
+            await self.send_html(
+                update,
+                "<b>Backend switched to Codex for this chat</b>\n"
+                f"{self._code_block(display_prefix)}",
+            )
+            return
+
+        if raw == "opencode":
+            current_workdir = self._effective_workdir(chat_id)
+            self._set_chat_command_prefix(chat_id, OPENCODE_COMMAND_PREFIX)
+            display_prefix = self._display_command_prefix(chat_id, self._get_chat_command_prefix(chat_id))
+            await self.send_html(
+                update,
+                f"<b>Backend switched to OpenCode for this chat</b>\n"
+                f"Project path: {self._code_inline(str(current_workdir))}\n\n"
+                f"{self._code_block(display_prefix)}",
+            )
+            return
+
+        await self.send_html(
+            update,
+            "<b>Unknown backend</b>\n"
+            "Available: <code>codex</code>, <code>opencode</code>\n\n"
+            "<code>/backend codex</code> - switch to Codex backend\n"
+            "<code>/backend opencode</code> - switch to OpenCode backend",
+        )
+
 
     async def memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_chat is None:
@@ -4131,7 +4462,7 @@ class Bridge:
             status_message_id=status_message_id,
             cleanup_paths=list(cleanup_paths or []),
             workdir=self._effective_workdir(chat_id),
-            command_prefix=self.codex_prefix,
+            command_prefix=self._get_chat_command_prefix(chat_id),
             session_mode="chat",
             memory_scope=self._default_memory_scope(chat_id),
             role=self._active_role_name(chat_id),
@@ -4373,7 +4704,18 @@ class Bridge:
             raise
         except Exception as err:
             await _stop_progress_updates()
-            error_text = f"<b>Task failed</b>\nReason: {self._code_inline(str(err))}"
+            diagnostic_path = self._write_failure_diagnostic(request, prepared_prompt, cmd_args, workdir, output, err)
+            error_sections = [
+                "<b>Task failed</b>",
+                f"Reason: {self._code_inline(str(err))}",
+                f"Command: {self._code_inline(self._redacted_command_text(shlex.join(cmd_args)))}",
+                f"Workdir: {self._code_inline(str(workdir))}",
+            ]
+            excerpt = self._error_output_excerpt(output)
+            if excerpt:
+                error_sections.append(f"Last output:\n{self._code_block(excerpt)}")
+            error_sections.append(f"Diagnostic: {self._code_inline(str(diagnostic_path))}")
+            error_text = "\n".join(error_sections)
             if status_message_id is not None:
                 await self.safe_edit(
                     context,
@@ -4400,6 +4742,7 @@ class Bridge:
                 success=False,
                 error_text=str(err),
                 summary=self._truncate_text(str(err), limit=240),
+                diagnostic_file=str(diagnostic_path),
                 status_message_id=status_message_id,
             )
         finally:
@@ -4432,7 +4775,7 @@ class Bridge:
             status_message_id=None,
             cleanup_paths=[],
             workdir=Path(job.workdir) if job.workdir else self._effective_workdir(job.chat_id),
-            command_prefix=job.command_prefix or self.codex_prefix,
+            command_prefix=job.command_prefix or self._get_chat_command_prefix(job.chat_id),
             session_mode="job" if job.session_policy == "resume-job" else "fresh",
             session_ref=job.id,
             memory_scope=job.memory_scope or self._default_memory_scope(job.chat_id),

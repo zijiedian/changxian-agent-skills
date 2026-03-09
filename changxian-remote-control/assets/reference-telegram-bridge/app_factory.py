@@ -51,6 +51,7 @@ def build_app(settings: Settings) -> tuple[FastAPI, Optional[Application]]:
             .build()
         )
         telegram_app.add_handler(CommandHandler("start", bridge.start))
+        telegram_app.add_handler(CommandHandler("run", bridge.run))
         telegram_app.add_handler(CommandHandler("id", bridge.chat_id))
         telegram_app.add_handler(CommandHandler("status", bridge.status))
         telegram_app.add_handler(CommandHandler("cancel", bridge.cancel))
@@ -60,9 +61,11 @@ def build_app(settings: Settings) -> tuple[FastAPI, Optional[Application]]:
         telegram_app.add_handler(CommandHandler("auth", bridge.auth))
         telegram_app.add_handler(CommandHandler("cmd", bridge.cmd))
         telegram_app.add_handler(CommandHandler("setting", bridge.setting))
+        telegram_app.add_handler(CommandHandler("backend", bridge.backend))
         telegram_app.add_handler(CallbackQueryHandler(bridge.paginate, pattern=r"^page:"))
         telegram_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, bridge.run_image))
-        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bridge.run_text))
+        if settings.allow_plain_text:
+            telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bridge.run_text))
         return telegram_app
 
     @asynccontextmanager

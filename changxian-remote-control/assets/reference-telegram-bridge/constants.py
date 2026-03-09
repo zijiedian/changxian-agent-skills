@@ -1,7 +1,7 @@
 import re
 
 EDIT_THROTTLE_SECONDS = 1.0
-IDLE_EDIT_THROTTLE_SECONDS = 6.0
+IDLE_EDIT_THROTTLE_SECONDS = 1.0
 STREAM_PROGRESS_IO_TIMEOUT_SECONDS = 3.0
 STREAM_PREVIEW_LIMIT = 2200
 STREAM_PREVIEW_LINE_LIMIT = 24
@@ -18,6 +18,7 @@ DEFAULT_MAX_CONCURRENT_TASKS = 2
 DEFAULT_CODEX_TIMEOUT_SECONDS = 21600
 DEFAULT_AUTH_TTL_SECONDS = 604800
 MIN_AUTH_PASSPHRASE_LENGTH = 12
+DEFAULT_CODEX_COMMAND_PREFIX = "codex -a never --search exec -s danger-full-access --skip-git-repo-check"
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 SESSION_ID_RE = re.compile(r"session id:\s*([0-9a-fA-F-]{36})", re.IGNORECASE)
@@ -40,6 +41,10 @@ SHELL_PROMPT_RE = re.compile(r"^\s*(?:\$|#)\s+\S+")
 SENSITIVE_OPTION_RE = re.compile(r"(?:token|secret|password|passwd|api[-_]?key|auth)", re.IGNORECASE)
 LONG_SECRET_RE = re.compile(r"^[A-Za-z0-9_\-]{24,}$")
 PREVIEW_DIVIDER_RE = re.compile(r"^-{3,}$")
+CONFIG_CONTEXT_NOISE_RE = re.compile(
+    r"^\[config-context\]\s+getConfigContext\(\) called before initConfigContext\(\); defaulting to CLI paths\.$",
+    re.IGNORECASE,
+)
 PREVIEW_NOISE_PATTERNS = (
     re.compile(r"^OpenAI Codex v", re.IGNORECASE),
     re.compile(r"^(?:model|provider|approval|sandbox|workdir|reasoning effort):", re.IGNORECASE),
@@ -47,6 +52,7 @@ PREVIEW_NOISE_PATTERNS = (
     re.compile(r"^(?:user|assistant|codex|exec)$", re.IGNORECASE),
     re.compile(r"^mcp startup:", re.IGNORECASE),
     re.compile(r"^tokens used$", re.IGNORECASE),
+    CONFIG_CONTEXT_NOISE_RE,
     PREVIEW_DIVIDER_RE,
 )
 
@@ -60,3 +66,6 @@ PATCH_DELETE_PREFIX = "*** Delete File: "
 PATCH_MOVE_PREFIX = "*** Move to: "
 PATCH_END_OF_FILE_MARKER = "*** End of File"
 THINKING_SPINNER_FRAMES = ("-", "\\", "|", "/")
+# OpenCode 默认命令前缀
+OPENCODE_PROJECT_PATH_PLACEHOLDER = "<PROJECT_PATH>"
+OPENCODE_COMMAND_PREFIX = "opencode run --dir <PROJECT_PATH> -m opencode/minimax-m2.5-free"

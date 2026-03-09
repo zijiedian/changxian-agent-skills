@@ -236,6 +236,22 @@ class MemoryStore:
         if not scope_values:
             return []
         placeholders = ",".join("?" for _ in scope_values)
+        limit_value = max(1, limit)
+        if not query.strip():
+            sql = (
+                "SELECT * FROM memories "
+                f"WHERE chat_id = ? AND scope IN ({placeholders}) AND (expires_at IS NULL OR expires_at > ?) "
+                "ORDER BY pinned DESC, importance DESC, updated_at DESC "
+                "LIMIT ?"
+            )
+            params: list[object] = [chat_id, *scope_values, int(time.time()), limit_value]
+            with self._connect() as conn:
+                rows = conn.execute(sql, tuple(params)).fetchall()
+            records = [self._row_to_memory(row) for row in rows]
+            if records:
+                self.touch_memories([record.id for record in records])
+            return records
+
         sql = (
             "SELECT * FROM memories "
             f"WHERE chat_id = ? AND scope IN ({placeholders}) AND (expires_at IS NULL OR expires_at > ?)"
@@ -280,8 +296,8 @@ class MemoryStore:
             scored.append((score, record))
 
         scored.sort(key=lambda item: (-item[0], -item[1].updated_at))
-        selected = [record for _, record in scored[: max(1, limit)]]
-        if len(selected) < max(1, limit) and fallback_scored:
+        selected = [record for _, record in scored[:limit_value]]
+        if len(selected) < limit_value and fallback_scored:
             fallback_scored.sort(key=lambda item: (-item[0], -item[1].updated_at))
             selected_ids = {record.id for record in selected}
             for _, record in fallback_scored:
@@ -289,7 +305,7 @@ class MemoryStore:
                     continue
                 selected.append(record)
                 selected_ids.add(record.id)
-                if len(selected) >= max(1, limit):
+                if len(selected) >= limit_value:
                     break
         if selected:
             self.touch_memories([record.id for record in selected])
@@ -344,10 +360,11 @@ class MemoryStore:
         return int(row["count"]) if row is not None else 0
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=5)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     @staticmethod

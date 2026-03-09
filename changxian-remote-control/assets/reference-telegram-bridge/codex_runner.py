@@ -5,10 +5,23 @@ from pathlib import Path, PurePath
 from typing import AsyncIterator, Optional
 
 
-def _validate_codex_prefix(prefix: str) -> list[str]:
+def _command_parts(prefix: str) -> list[str]:
     parts = shlex.split(prefix)
     if not parts:
         raise ValueError("command prefix cannot be empty")
+    return parts
+
+
+def _is_opencode_prefix(prefix: str) -> bool:
+    try:
+        parts = _command_parts(prefix)
+    except ValueError:
+        return False
+    return "opencode" in PurePath(parts[0]).name.lower()
+
+
+def _validate_codex_prefix(prefix: str) -> list[str]:
+    parts = _command_parts(prefix)
     first = PurePath(parts[0]).name.lower()
     if "codex" not in first:
         raise ValueError("command prefix must start with a codex executable")
@@ -36,7 +49,32 @@ def _validate_codex_prefix(prefix: str) -> list[str]:
     return parts
 
 
-async def run_codex_stream(cmd: list[str], timeout_seconds: int, cwd: Optional[Path] = None) -> AsyncIterator[str]:
+def _validate_opencode_prefix(prefix: str) -> list[str]:
+    """Validate an OpenCode command prefix for this local CLI."""
+    parts = _command_parts(prefix)
+    first = PurePath(parts[0]).name.lower()
+    if "opencode" not in first:
+        raise ValueError("command prefix must start with opencode executable")
+    if "run" not in parts:
+        raise ValueError("command prefix must include run")
+    if "--dir" not in parts:
+        raise ValueError("command prefix must include --dir")
+    dir_idx = parts.index("--dir")
+    if dir_idx + 1 >= len(parts) or not parts[dir_idx + 1].strip():
+        raise ValueError("command prefix must provide a directory after --dir")
+    return parts
+
+
+def _validate_command_prefix(prefix: str) -> list[str]:
+    if _is_opencode_prefix(prefix):
+        return _validate_opencode_prefix(prefix)
+    return _validate_codex_prefix(prefix)
+
+
+async def run_codex_stream(
+    cmd: list[str], timeout_seconds: int, cwd: Optional[Path] = None
+) -> AsyncIterator[str]:
+    tool_name = Path(cmd[0]).name if cmd else "command"
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -45,7 +83,7 @@ async def run_codex_stream(cmd: list[str], timeout_seconds: int, cwd: Optional[P
             cwd=str(cwd) if cwd else None,
         )
     except FileNotFoundError as err:
-        raise RuntimeError(f"codex command not found: {cmd[0]}") from err
+        raise RuntimeError(f"{tool_name} command not found: {cmd[0]}") from err
     if proc.stdout is None:
         proc.kill()
         await proc.wait()
@@ -63,7 +101,9 @@ async def run_codex_stream(cmd: list[str], timeout_seconds: int, cwd: Optional[P
             remaining = timeout_seconds - elapsed
             read_timeout = min(1.0, remaining)
             try:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=read_timeout)
+                line = await asyncio.wait_for(
+                    proc.stdout.readline(), timeout=read_timeout
+                )
             except asyncio.TimeoutError:
                 # Heartbeat: keep UI updates (spinner/timer) flowing while waiting for next chunk.
                 yield ""
@@ -78,4 +118,4 @@ async def run_codex_stream(cmd: list[str], timeout_seconds: int, cwd: Optional[P
 
     code = await proc.wait()
     if code != 0:
-        raise RuntimeError(f"codex exited with code {code}")
+        raise RuntimeError(f"{tool_name} exited with code {code}")

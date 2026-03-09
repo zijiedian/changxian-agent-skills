@@ -16,7 +16,7 @@ from constants import (
     DEFAULT_MAX_CONCURRENT_TASKS,
     MIN_AUTH_PASSPHRASE_LENGTH,
 )
-from codex_runner import _validate_codex_prefix
+from codex_runner import _validate_command_prefix
 
 
 @dataclass
@@ -44,6 +44,7 @@ class Settings:
     enable_scheduler: bool
     scheduler_poll_seconds: int
     default_timezone: str
+    default_workdir: str
     auth_passphrase: str
     auth_ttl_seconds: int
 
@@ -184,9 +185,17 @@ def load_settings() -> Settings:
     enable_scheduler = os.getenv("TG_ENABLE_SCHEDULER", "1").strip().lower() in {"1", "true", "yes"}
     scheduler_poll_seconds = int(os.getenv("TG_SCHEDULER_POLL_SECONDS", "5"))
     default_timezone = os.getenv("TG_DEFAULT_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai"
+    default_workdir_raw = os.getenv("TG_DEFAULT_WORKDIR", "").strip()
     auth_passphrase = os.getenv("TG_AUTH_PASSPHRASE", "").strip()
     auth_ttl_raw = os.getenv("TG_AUTH_TTL_SECONDS", str(DEFAULT_AUTH_TTL_SECONDS))
     auth_ttl_seconds = _parse_duration_seconds(auth_ttl_raw, "TG_AUTH_TTL_SECONDS")
+
+    if default_workdir_raw:
+        default_workdir_path = Path(default_workdir_raw).expanduser().resolve()
+    elif getattr(sys, "frozen", False):
+        default_workdir_path = Path.home().resolve()
+    else:
+        default_workdir_path = runtime_base_dir().resolve()
 
     if not token:
         raise RuntimeError("TG_BOT_TOKEN is required")
@@ -222,9 +231,13 @@ def load_settings() -> Settings:
         ZoneInfo(default_timezone)
     except Exception as err:
         raise RuntimeError(f"TG_DEFAULT_TIMEZONE is invalid: {default_timezone}") from err
+    if not default_workdir_path.exists():
+        raise RuntimeError(f"TG_DEFAULT_WORKDIR does not exist: {default_workdir_path}")
+    if not default_workdir_path.is_dir():
+        raise RuntimeError(f"TG_DEFAULT_WORKDIR is not a directory: {default_workdir_path}")
     if auth_passphrase and len(auth_passphrase) < MIN_AUTH_PASSPHRASE_LENGTH:
         raise RuntimeError(f"TG_AUTH_PASSPHRASE must be at least {MIN_AUTH_PASSPHRASE_LENGTH} characters")
-    _validate_codex_prefix(codex_prefix)
+    _validate_command_prefix(codex_prefix)
 
     return Settings(
         bot_token=token,
@@ -250,6 +263,7 @@ def load_settings() -> Settings:
         enable_scheduler=enable_scheduler,
         scheduler_poll_seconds=scheduler_poll_seconds,
         default_timezone=default_timezone,
+        default_workdir=str(default_workdir_path),
         auth_passphrase=auth_passphrase,
         auth_ttl_seconds=auth_ttl_seconds,
     )
