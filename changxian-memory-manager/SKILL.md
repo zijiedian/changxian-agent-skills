@@ -1,56 +1,44 @@
 ---
 name: changxian-memory-manager
-description: Manage long-term chat memory for changxian-agent. Use when a conversation includes saved memory state, when the user asks to remember or forget something, or when stable preferences and facts should update the chat memory.
+description: Manage durable chat memory for changxian-agent. Use when a turn includes `[MEMORY STATE]` or the user asks to remember, forget, pin, unpin, revise, or inspect stable preferences, facts, or constraints that should matter in future turns.
 ---
 
 # Changxian Memory Manager
 
-## When To Use
+Use this skill only for durable memory. Do not treat it as a scratchpad for one-off task details.
 
-Use this skill whenever changxian-agent provides a `[MEMORY STATE]` block or the user expresses any long-term preference, standing instruction, reusable fact, or correction to previously saved memory.
+## Keep In Memory
 
-## Goals
+- stable user preferences for language, tone, structure, and workflow
+- durable facts that will matter again later
+- recurring project constraints or repository conventions
+- explicit corrections that replace older saved preferences
 
-- Use saved memory as active session context.
-- Keep memory compact, accurate, and non-duplicative.
-- Update memory conservatively when the user clearly wants to remember, forget, pin, unpin, or revise something.
-
-## What Belongs In Memory
-
-Keep only stable, reusable context such as:
-
-- preferred language, tone, structure, and output defaults
-- recurring project constraints and repository conventions
-- durable user facts that matter for future turns
-- corrections that replace older saved preferences
-
-Do not store:
+## Keep Out Of Memory
 
 - secrets, tokens, passwords, or private keys
 - chain-of-thought or hidden reasoning
-- one-off task details that will not matter later
-- large verbatim outputs or temporary logs
+- temporary logs, bulky outputs, or transient execution state
+- one-off task details that will not matter after the current task
 
-## Memory Editing Rules
+## Editing Rules
 
-- Treat `[MEMORY STATE]` as the authoritative saved memory for this chat.
+- Treat `[MEMORY STATE]` as the authoritative saved memory for the current scope.
 - Prefer updating or merging an existing memory instead of creating duplicates.
-- When the user explicitly replaces an old preference, update or delete the stale memory.
-- If no memory change is needed, emit no memory-ops block.
-- Avoid no-op operations that only repeat existing memory values.
-- Do not add routine "memory reminder" prose in normal replies.
-- When memory really changes, explain the concrete change points briefly (added/updated/deleted/pinned item).
-- Keep normal user-facing prose separate from memory operations.
+- Delete or replace stale memories when the user clearly supersedes them.
+- Emit no memory block when persistent memory should stay unchanged.
+- If the user only wants to use or inspect saved memory, reply normally and emit no ops block.
+- Briefly explain real memory changes in user-facing prose.
 
 ## Output Protocol
 
-When memory should change, append exactly one fenced block at the very end of the answer:
+When persistent memory should change, append exactly one fenced block at the very end of the answer:
 
 ```tg-memory-ops
 {"ops":[...]}
 ```
 
-Storage note: this skill emits memory operations only. The host bridge consumes `tg-memory-ops` and persists memory to its state store (for changxian remote control, this is `agent_state.sqlite3`).
+The host runtime consumes `tg-memory-ops` and persists the resulting memory changes.
 
 Supported operations:
 
@@ -84,10 +72,4 @@ User says: “忘掉我之前说的英文优先。”
 
 ```tg-memory-ops
 {"ops":[{"op":"delete","query":"英文优先"}]}
-```
-
-User says: “把‘默认中文回答’这条置顶。”
-
-```tg-memory-ops
-{"ops":[{"op":"pin","query":"默认中文回答"}]}
 ```

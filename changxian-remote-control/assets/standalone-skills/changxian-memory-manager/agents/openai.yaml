@@ -1,4 +1,4 @@
 interface:
   display_name: "Changxian Memory Manager"
-  short_description: "Manage long-term chat memory for changxian-agent"
-  default_prompt: "Use changxian-memory-manager to load, update, merge, and delete long-term chat memory automatically."
+  short_description: "Manage durable chat memory"
+  default_prompt: "Use $changxian-memory-manager to update, merge, pin, or delete durable chat memory from the current memory state."

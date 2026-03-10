@@ -1,4 +1,4 @@
 interface:
   display_name: "Changxian Role Manager"
-  short_description: "Manage reusable chat roles for changxian-agent"
-  default_prompt: "Use changxian-role-manager to create, update, select, and clear reusable roles for changxian-agent conversations."
+  short_description: "Manage reusable chat roles"
+  default_prompt: "Use $changxian-role-manager to create, update, activate, clear, or delete reusable chat roles from the current role state."

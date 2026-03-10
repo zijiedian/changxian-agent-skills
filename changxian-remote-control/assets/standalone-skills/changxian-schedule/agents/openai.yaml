@@ -1,4 +1,4 @@
 interface:
   display_name: "Changxian Schedule"
-  short_description: "Manage scheduled jobs for changxian-agent"
-  default_prompt: "Use changxian-schedule to create, update, pause, resume, trigger, and delete scheduled jobs based on schedule state."
+  short_description: "Manage recurring and one-time jobs"
+  default_prompt: "Use $changxian-schedule to create, inspect, update, pause, resume, run, or delete scheduled jobs from the current schedule state."

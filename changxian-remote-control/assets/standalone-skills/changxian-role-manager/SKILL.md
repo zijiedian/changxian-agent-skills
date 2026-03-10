@@ -1,47 +1,35 @@
 ---
 name: changxian-role-manager
-description: Manage reusable chat roles for changxian-agent. Use when a conversation includes role state, when the user asks to create or revise a role, or when the user wants to activate, clear, or delete a saved role.
+description: Manage reusable chat roles for changxian-agent. Use when a turn includes `[ROLE STATE]` or the user asks to create, revise, activate, clear, inspect, or delete a persistent role or work mode.
 ---
 
 # Changxian Role Manager
 
-## When To Use
+Use this skill only for reusable roles. Keep role definitions stable enough to reuse across future turns.
 
-Use this skill whenever changxian-agent provides a `[ROLE STATE]` block or the user asks to define, refine, select, stop using, or remove a reusable role.
-
-## Goals
-
-- Keep reusable roles in a compact, durable form.
-- Let the assistant immediately act in a requested role for the current turn.
-- Persist role definitions only when they are reusable beyond the current task.
-
-## What A Saved Role Should Contain
-
-Saved roles should describe stable working behavior, such as:
+## Put In A Saved Role
 
 - the role's mission and perspective
 - what it prioritizes
-- preferred output structure
-- recurring constraints or review style
+- preferred output shape or review style
+- durable constraints that should apply whenever the role is active
 
-Do not save:
+## Keep Out Of A Saved Role
 
 - one-off task details
 - secrets or credentials
-- hidden reasoning or chain-of-thought
-- content that only matters for the current turn
+- hidden reasoning
+- content that matters only for the current request
 
-## Role Editing Rules
+## Editing Rules
 
-- Treat `[ROLE STATE]` as the authoritative list of saved roles and the current active role.
-- If the user asks to use a role for this turn, do so immediately in the response.
-- Emit a role-ops block only when the role catalog or active role should persist after this turn.
-- If the user request is not about role management, never emit a role-ops block.
-- When updating an existing role, overwrite the canonical definition instead of creating duplicates.
-- Avoid no-op role operations that only repeat the current role content or active-role state.
-- Do not add routine "role reminder" prose in normal replies.
-- When role state really changes, explain the concrete change points briefly (added/updated/activated/cleared/deleted role).
+- Treat `[ROLE STATE]` as the authoritative role catalog for the chat.
+- If the user wants to use a role right now, adopt it immediately in the response.
+- Emit a role block only when the saved catalog or persistent active role should change.
+- If the user only wants to inspect existing roles, reply normally and emit no ops block.
+- Overwrite the canonical definition when updating an existing role instead of creating duplicates.
 - Use lowercase hyphenated role names.
+- Briefly explain real role changes in user-facing prose.
 
 ## Output Protocol
 
@@ -51,7 +39,7 @@ When persistent role state should change, append exactly one fenced block at the
 {"ops":[...]}
 ```
 
-Storage note: this skill emits role operations only. The host bridge consumes `tg-role-ops` and persists role definitions and active-role mapping to its state store (for changxian remote control, `roles/*.md` and `chat_roles.json`).
+The host runtime consumes `tg-role-ops` and persists the resulting role changes.
 
 Supported operations:
 
@@ -79,16 +67,4 @@ User says: “以后用 researcher 这个角色。”
 
 ```tg-role-ops
 {"ops":[{"op":"use_role","name":"researcher"}]}
-```
-
-User says: “不要再默认用任何角色了。”
-
-```tg-role-ops
-{"ops":[{"op":"clear_role"}]}
-```
-
-User says: “把 old-reviewer 这个角色删掉。”
-
-```tg-role-ops
-{"ops":[{"op":"delete_role","name":"old-reviewer"}]}
 ```

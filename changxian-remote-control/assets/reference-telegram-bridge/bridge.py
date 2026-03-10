@@ -198,7 +198,11 @@ SCHEDULE_SYNC_ACTION_RE = re.compile(
     r"创建定时|新增定时|添加定时|更新定时|修改定时|暂停定时|恢复定时|删除定时|设置定时)"
 )
 SCHEDULE_SYNC_SCHEDULE_RE = re.compile(
-    r"(?i)(?:\bcron\b|\bevery\b|\bonce\b|每天|每周|每月|每隔)"
+    r"(?i)(?:\bcron\b|\bevery\b|\bonce\b|每天|每周|每月|每隔|每\s*\d+\s*(?:分钟|小时|天|周|月)|\d+\s*(?:minutes?|hours?|days?|weeks?|months?))"
+)
+SCHEDULE_SYNC_JOB_TARGET_RE = re.compile(r"(?i)\bjob_[a-z0-9]+\b")
+SCHEDULE_SYNC_JOB_EDIT_RE = re.compile(
+    r"(?i)(?:改成|改为|修改|更新|设置|设为|暂停|恢复|启用|禁用|删除|移除|触发|运行|prompt|role)"
 )
 SCHEDULE_SYNC_READONLY_RE = re.compile(
     r"(?i)(?:查看|显示|列出|罗列|详情|细节|状态|有哪些|show|display|list|detail|details|status|inspect)"
@@ -1084,6 +1088,37 @@ class Bridge:
 
         return "\n".join(lines) if lines else "No active memories are stored for this chat yet."
 
+    @staticmethod
+    def _dedupe_memory_context(memories: list[MemoryRecord]) -> list[MemoryRecord]:
+        deduped: list[MemoryRecord] = []
+        seen: set[tuple[str, str]] = set()
+        for memory in memories:
+            content_key = " ".join(memory.content.split()).strip().lower()
+            title_key = " ".join(memory.title.split()).strip().lower()
+            key = (title_key, content_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(memory)
+        return deduped
+
+    def _format_memory_context(self, memories: list[MemoryRecord], max_chars: int = 1200) -> str:
+        if not memories:
+            return "No relevant saved memories were selected for this task."
+
+        lines: list[str] = []
+        total_chars = 0
+        for memory in self._dedupe_memory_context(memories):
+            label = memory.kind.strip() or "note"
+            content = self._truncate_text(" ".join(memory.content.split()), limit=220)
+            entry = f"- {label}: {content}"
+            if total_chars + len(entry) > max_chars:
+                break
+            lines.append(entry)
+            total_chars += len(entry)
+
+        return "\n".join(lines) if lines else "No relevant saved memories were selected for this task."
+
     def _format_schedule_state(self, chat_id: int) -> str:
         if not self.settings.enable_scheduler:
             return "Scheduler is disabled for this bridge instance."
@@ -1110,22 +1145,71 @@ class Bridge:
 
         return "\n".join(lines) if lines else "No scheduled jobs are stored for this chat yet."
 
+    def _format_current_schedule_job(self, request: ExecutionRequest) -> str:
+        if request.source != "schedule" or not request.session_ref:
+            return ""
+
+        job = self.scheduler_store.get_job_by_id(request.session_ref)
+        if job is None:
+            return "Current scheduled job metadata is unavailable."
+
+        state = "enabled" if job.enabled else "paused"
+        prompt_preview = self._truncate_text(" ".join(job.prompt_template.split()), limit=220)
+        lines = [
+            f"id={job.id} name={job.name or '(unnamed)'} state={state}",
+            f"schedule={job.schedule_type} {job.schedule_expr} tz={job.timezone} next={self._format_timestamp(job.next_run_at, job.timezone)}",
+            f"role={job.role or '(none)'} memory_scope={job.memory_scope or '(none)'} session_policy={job.session_policy}",
+            f"prompt={prompt_preview}",
+        ]
+        return "\n".join(lines)
+
+    def _load_memory_context(
+        self,
+        request: ExecutionRequest,
+        prompt: str,
+        *,
+        authoritative: bool,
+    ) -> list[MemoryRecord]:
+        if not self.settings.enable_memory:
+            return []
+
+        scopes = self._ordered_memory_scopes(request)
+        if authoritative:
+            query = ""
+            limit = self.settings.memory_max_items
+        else:
+            query = prompt
+            limit = min(4, self.settings.memory_max_items)
+
+        return self.memory_store.search_memories(
+            chat_id=request.chat_id,
+            scopes=scopes,
+            query=query,
+            limit=limit,
+        )
+
     def _build_prompt_with_memory(self, request: ExecutionRequest) -> tuple[str, list[MemoryRecord]]:
         prompt = request.prompt.strip()
         if not prompt:
             return prompt, []
 
         sections: list[str] = []
-        compact_context = self._is_opencode_request(request)
+        compact_context = request.source in {"telegram", "schedule"} or self._is_opencode_request(request)
         role_sync_intent = self._has_role_sync_intent(prompt)
         memory_sync_intent = self._has_memory_sync_intent(prompt)
-        schedule_sync_intent = request.source == "schedule" or self._has_schedule_sync_intent(prompt)
+        schedule_sync_intent = self._has_schedule_sync_intent(prompt)
 
         if compact_context:
+            backend_name = "OpenCode" if self._is_opencode_request(request) else "Codex CLI"
+            host_note = (
+                "This run was triggered by a scheduled job."
+                if request.source == "schedule"
+                else "This run came from an interactive Telegram chat."
+            )
             sections.append(
                 "[REMOTE HOST]\n"
-                "Running through Telegram remote control. Keep progress concise and action-oriented. "
-                "Only emit tg-role-ops, tg-memory-ops, or tg-schedule-ops blocks when the user explicitly asks to change roles, memory, or schedules."
+                f"Running through Telegram remote control using {backend_name}. {host_note} "
+                "Keep progress concise and action-oriented. Only emit tg-role-ops, tg-memory-ops, or tg-schedule-ops blocks when the user explicitly asks to change roles, memory, or schedules."
             )
         else:
             remote_skill_body = self._read_skill_body(REMOTE_CONTROL_SKILL_NAME)
@@ -1163,17 +1247,9 @@ class Bridge:
 
         memories: list[MemoryRecord] = []
         if self.settings.enable_memory:
-            scopes = self._ordered_memory_scopes(request)
-            include_memory_context = (not compact_context) or memory_sync_intent or request.source == "schedule"
-            if include_memory_context:
-                memories = self.memory_store.search_memories(
-                    chat_id=request.chat_id,
-                    scopes=scopes,
-                    query="",
-                    limit=self.settings.memory_max_items,
-                )
+            memories = self._load_memory_context(request, prompt, authoritative=memory_sync_intent or not compact_context)
             skill_body = ""
-            if include_memory_context and ((not compact_context) or memory_sync_intent):
+            if memories and ((not compact_context) or memory_sync_intent):
                 skill_body = self._read_skill_body(MEMORY_SKILL_NAME)
             if skill_body:
                 sections.append(
@@ -1182,12 +1258,26 @@ class Bridge:
                     "The following skill is preloaded by changxian-agent for this conversation. Follow it exactly when using or updating memory.\n\n"
                     + skill_body
                 )
-            if include_memory_context and memories:
+            if memories and ((not compact_context) or memory_sync_intent):
                 sections.append(
                     "[MEMORY STATE]\n"
                     "This memory state is loaded at conversation init and refreshed on each turn. Use it as the authoritative saved context for this chat.\n"
                     + self._format_memory_state(memories)
                 )
+            elif memories:
+                sections.append(
+                    "[MEMORY CONTEXT]\n"
+                    "Relevant saved memory selected for this task:\n"
+                    + self._format_memory_context(memories)
+                )
+
+        current_schedule_job = self._format_current_schedule_job(request)
+        if current_schedule_job:
+            sections.append(
+                "[SCHEDULED JOB]\n"
+                "This run was launched by the following scheduled job:\n"
+                + current_schedule_job
+            )
 
         if self.settings.enable_scheduler and ((not compact_context) or schedule_sync_intent):
             skill_body = self._read_skill_body(SCHEDULE_SKILL_NAME)
@@ -1244,6 +1334,8 @@ class Bridge:
         if not text:
             return False
         if SCHEDULE_SYNC_ACTION_RE.search(text):
+            return True
+        if SCHEDULE_SYNC_JOB_TARGET_RE.search(text) and SCHEDULE_SYNC_JOB_EDIT_RE.search(text):
             return True
         if SCHEDULE_SYNC_READONLY_RE.search(text):
             return False
@@ -4609,6 +4701,8 @@ class Bridge:
                 schedule_ops = []
             schedule_sync_summary = await self._apply_schedule_skill_ops(request, schedule_ops)
             memory_ops, visible_output = self._extract_memory_ops(visible_output)
+            if memory_ops and not self._has_memory_sync_intent(request.prompt):
+                memory_ops = []
             memory_sync_summary = self._apply_memory_skill_ops(request, memory_ops)
             if not visible_output and (role_sync_summary or schedule_sync_summary or memory_sync_summary):
                 visible_output = "Role, schedule, or memory updated."

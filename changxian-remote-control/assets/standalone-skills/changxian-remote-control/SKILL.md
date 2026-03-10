@@ -1,104 +1,48 @@
 ---
 name: changxian-remote-control
-description: Operate changxian-agent through a remote host bridge. Use when the task runs in chat, a bot, a remote UI, or a scheduled automation surface that streams progress, accepts follow-up input, or triggers future jobs.
+description: Operate changxian-agent from a remote host or bridge such as chat, bot, webhook, remote UI, or scheduled runtime. Use when work runs outside a local terminal and the host may support task submission, streaming progress, cancellation, session reset, media input, workdir changes, runtime toggles, or scheduled execution.
 ---
 
 # Changxian Remote Control
 
-## When To Use
+Use this skill only for remote-host behavior. Do not manage durable memory, reusable roles, or schedule state here unless the active host explicitly asks for those host-side actions.
 
-Use this skill when changxian-agent is operating through a remote host instead of a local terminal, especially when the host provides one or more of these capabilities:
+## Working Model
 
-- message-based task submission
-- incremental progress updates
-- cancellation or reset controls
-- media input such as images or files
-- saved runtime settings
-- scheduled or recurring execution
+- Treat the host as a control surface with a concrete capability set.
+- Read the current host contract before assuming command names or flows.
+- Talk in terms of capabilities when the exact adapter commands are unknown.
+- Separate immediate actions from persistent host settings.
 
-This skill is host-agnostic. It does not require a specific bridge implementation and can be adapted to chat-style, bot-style, or custom remote-control hosts.
+## Response Style
 
-## Core Model
-
-Treat the host as a control surface with an adapter contract.
-
-A host may provide:
-
-- task submission
-- progress streaming
-- status inspection
-- cancellation
-- session reset
-- working-directory changes
-- runtime setting toggles
-- permission-tier switching
-- scheduled jobs
-- media input
-
-Do not assume every host supports every capability. Adapt to the active host contract.
-
-## Operating Style
-
-- Prefer concise, status-friendly responses because the host may have limited screen space.
+- Keep progress updates short and easy to scan.
 - Surface assumptions that matter for remote execution.
-- Favor incremental updates over long monologues when the host streams progress.
-- Keep final handoff messages scannable and action-oriented.
-- If the host exposes scheduling, suggest it for repeated or delayed work.
-- Avoid repetitive memory/role reminders; only mention them when a real state change is needed.
+- Prefer incremental updates over long monologues.
+- Keep the final handoff action-oriented.
 
-## Scheduling Guidance
+## Host Rules
 
-If the active host exposes scheduled execution:
-
-- make scheduled prompts self-contained
-- include the intended role or memory expectations when they matter later
-- distinguish one-time follow-up work from recurring automation
-- prefer stable, deterministic instructions for recurring jobs
-
-## Cooperation With Other Skills
-
-When the host also supports durable state:
-
-- use `changxian-memory-manager` for long-term preferences and facts
-- use `changxian-role-manager` for reusable working modes and personas
-- use `changxian-schedule` for scheduled-job lifecycle (create/update/pause/resume/run/delete)
-
-Do not duplicate those responsibilities here. Coordinate with them.
-
-## Host Adaptation Rules
-
-- Read the current host contract before assuming command names or control flows.
-- If a host-specific reference is available, prefer it over generic assumptions.
-- If only the generic contract is available, talk in terms of capabilities rather than exact commands.
+- Confirm which capabilities are actually available before using them.
+- If the host supports workdir, permissions, or runtime toggles, name the setting being changed.
+- If the host supports media input, explain briefly how the file or image affects the task.
+- If the host supports scheduled execution, make scheduled prompts self-contained and deterministic.
+- If a capability is absent, adapt the workflow instead of pretending it exists.
 
 ## References
 
-- `references/host-bridge-contract.md` defines the generic host capabilities this skill expects.
-- `references/telegram-adapter-example.md` shows one concrete adapter profile built on Telegram-style controls.
+Resolve relative paths against this skill directory, not the current runtime workdir.
 
-## Standalone Bundle
+- `references/host-bridge-contract.md` for the generic host capability model.
+- `references/telegram-adapter-example.md` for one Telegram-style adapter profile.
+- `references/standalone-install.md` for standalone installation details.
 
-This skill also includes a standalone reference Telegram bridge runtime plus vendored companion skills, so installing `changxian-remote-control` alone is enough to deploy a working bridge.
+## Standalone Runtime
 
-Use:
+Use `scripts/install_reference_telegram_bridge.py` to install the bundled reference Telegram bridge runtime when a standalone deployment is needed.
 
-- `scripts/install_reference_telegram_bridge.py` to install the bundled runtime
-- `references/standalone-install.md` for the standalone layout, one-command install flow, and Windows usage
+## Example Requests
 
-The installed runtime exposes:
-
-- `start.py` as the cross-platform launcher
-- `start.sh` for macOS / Linux
-- `start.ps1` and `start.cmd` for Windows
-
-The bundled standalone package includes:
-
-- the bridge runtime copied from the current changxian-agent bridge
-- vendored copies of `changxian-memory-manager`, `changxian-role-manager`, `changxian-schedule`, and `changxian-remote-control`
-
-## Examples
-
-- “每天早上 9 点帮我做一次健康检查，如果失败就给我摘要”
-- “以后默认在某个工作目录下远程处理这个项目” 
-- “创建一个 reviewer 角色，今后远程审查都优先用它”
-- “我给你发截图，你帮我远程定位问题”
+- “以后默认在这个目录下远程处理这个项目。”
+- “我给你发一张截图，你帮我远程定位问题。”
+- “把接下来的执行过程用适合手机阅读的短进度更新返回给我。”
