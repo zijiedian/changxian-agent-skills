@@ -19,11 +19,11 @@
 ## Scheduled Jobs
 
 The reference bridge no longer exposes `/schedule` commands.
-Use `changxian-schedule` with `tg-schedule-ops` blocks to manage scheduled jobs.
+Use `changxian-schedule` with `rc-schedule-ops` blocks to manage scheduled jobs.
 
 Example operation block:
 
-```tg-schedule-ops
+```rc-schedule-ops
 {"ops":[{"op":"create_job","schedule_type":"cron","schedule_expr":"0 9 * * *","prompt":"check deployment health and summarize failures","timezone":"Asia/Shanghai"}]}
 ```
 

@@ -27,7 +27,7 @@ One Telegram adapter may choose commands like:
 - `/cwd <path>`
 - `/cmd ...`
 - `/setting ...`
-- skill-driven `tg-schedule-ops` blocks via `changxian-schedule`
+- skill-driven `rc-schedule-ops` blocks via `changxian-schedule`
 
 These names are only examples. Another bridge may expose different command names or button-based controls.
 

@@ -6,11 +6,5 @@ __pycache__/
 *.sqlite3-shm
 *.sqlite3-wal
 
-changxian-remote-control/assets/reference-telegram-bridge/.env
-changxian-remote-control/assets/reference-telegram-bridge/build/
-changxian-remote-control/assets/reference-telegram-bridge/dist/
-changxian-remote-control/assets/reference-telegram-bridge/restart.log
-changxian-remote-control/assets/reference-telegram-bridge/roles/
-changxian-remote-control/assets/reference-telegram-bridge/url-to-markdown/
-changxian-remote-control/assets/reference-telegram-bridge/remote-control.spec
-changxian-remote-control/assets/reference-telegram-bridge/outputs/
+changxian-remote-control/assets/reference-im-bridge/.env
+changxian-remote-control/assets/reference-im-bridge/node_modules/

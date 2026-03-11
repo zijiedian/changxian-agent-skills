@@ -35,11 +35,14 @@ Resolve relative paths against this skill directory, not the current runtime wor
 
 - `references/host-bridge-contract.md` for the generic host capability model.
 - `references/telegram-adapter-example.md` for one Telegram-style adapter profile.
-- `references/standalone-install.md` for standalone installation details.
+- `references/wecom-adapter-example.md` for one WeCom intelligent robot profile.
+- `references/standalone-install.md` for the JavaScript standalone runtime layout and startup flow.
 
-## Standalone Runtime
+## Bundled Runtime
 
-Use `scripts/install_reference_telegram_bridge.py` to install the bundled reference Telegram bridge runtime when a standalone deployment is needed.
+- The bundled runtime lives in `assets/reference-im-bridge/`.
+- It is a unified JavaScript bridge for Telegram and WeCom with shared auth, memory, role, and schedule state.
+- Prefer running this runtime directly or copying it as a standalone bundle. The legacy Python bridge assets have been removed.
 
 ## Example Requests
 

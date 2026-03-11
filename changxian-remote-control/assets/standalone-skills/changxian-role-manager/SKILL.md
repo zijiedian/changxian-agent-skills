@@ -35,11 +35,11 @@ Use this skill only for reusable roles. Keep role definitions stable enough to r
 
 When persistent role state should change, append exactly one fenced block at the very end of the answer:
 
-```tg-role-ops
+```rc-role-ops
 {"ops":[...]}
 ```
 
-The host runtime consumes `tg-role-ops` and persists the resulting role changes.
+The host runtime consumes `rc-role-ops` and persists the resulting role changes for the current chat scope.
 
 Supported operations:
 
@@ -59,12 +59,12 @@ Supported fields:
 
 User says: “创建一个叫 api-reviewer 的角色：专门检查接口兼容性和错误处理，以后默认用它。”
 
-```tg-role-ops
+```rc-role-ops
 {"ops":[{"op":"upsert_role","name":"api-reviewer","content":"You are an API reviewer. Prioritize compatibility risks, contract drift, error handling, and missing tests. Keep findings concise and actionable.","activate":true}]}
 ```
 
 User says: “以后用 researcher 这个角色。”
 
-```tg-role-ops
+```rc-role-ops
 {"ops":[{"op":"use_role","name":"researcher"}]}
 ```
