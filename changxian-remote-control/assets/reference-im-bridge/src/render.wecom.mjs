@@ -1,13 +1,14 @@
-const WECOM_MESSAGE_LIMIT = 3600;
-const THINKING_SPINNER_FRAMES = ['-', '\\', '|', '/'];
-const THINKING_DETAIL_MAX_LINES = 2;
-const THINKING_DETAIL_MAX_CHARS = 140;
+import {
+  buildPreviewDiffMarkdown,
+  buildPreviewSummaryMarkdown,
+  buildStructuredPreview,
+  sanitizePreview,
+  splitMarkdownPages,
+} from './utils.mjs';
 
-function clipInline(text, limit) {
-  const value = String(text || '').replace(/\s+/g, ' ').trim();
-  if (value.length <= limit) return value;
-  return `${value.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
-}
+const WECOM_MESSAGE_LIMIT = 3600;
+const WECOM_FINAL_PAGE_LIMIT = 3200;
+const THINKING_SPINNER_FRAMES = ['-', '\\', '|', '/'];
 
 function clipMessage(text, limit = WECOM_MESSAGE_LIMIT) {
   const value = String(text || '').trim() || '暂无输出';
@@ -25,18 +26,58 @@ function formatElapsedSeconds(elapsedSeconds) {
     : `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-function formatThinkingDetail(detail) {
-  const lines = String(detail || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (!lines.length) return '';
+function labelPages(pages) {
+  if (pages.length <= 1) return pages;
+  return pages.map((page, index) => `第 ${index + 1}/${pages.length} 页\n\n${page}`);
+}
 
-  const tail = lines.slice(-THINKING_DETAIL_MAX_LINES);
-  const rendered = [];
-  if (lines.length > tail.length) rendered.push('…');
-  rendered.push(...tail.map((line) => `• ${clipInline(line, THINKING_DETAIL_MAX_CHARS)}`));
-  return rendered.join('\n');
+function buildWeComPages(text) {
+  return labelPages(splitMarkdownPages(text, WECOM_FINAL_PAGE_LIMIT));
+}
+
+function resolvePreviewModel(payload) {
+  if (payload?.preview && typeof payload.preview === 'object' && !Array.isArray(payload.preview)) {
+    return payload.preview;
+  }
+  const status = String(payload?.status || 'Done');
+  const marker = String(payload?.marker || 'assistant').toLowerCase();
+  return buildStructuredPreview(payload?.text || '', { status, marker });
+}
+
+function progressHeading(preview) {
+  if (preview.phase === 'diff') return '正在整理变更';
+  if (preview.phase === 'research') return '正在检索资料';
+  if (preview.phase === 'exec') return '正在执行';
+  return '正在处理';
+}
+
+function buildWeComStructuredPages(preview) {
+  const pages = [];
+  const narrative = String(preview.proseMarkdown || '').trim();
+  if (narrative) {
+    pages.push(...splitMarkdownPages(narrative, WECOM_FINAL_PAGE_LIMIT));
+  } else {
+    const summary = buildPreviewSummaryMarkdown(preview, {
+      maxHighlights: 6,
+      maxChecks: 5,
+      maxFiles: 6,
+      maxNotes: 4,
+      includeDiffHint: true,
+    });
+    if (summary) pages.push(...splitMarkdownPages(summary, WECOM_FINAL_PAGE_LIMIT));
+  }
+
+  const diff = buildPreviewDiffMarkdown(preview, {
+    heading: '变更节选',
+    maxFiles: 2,
+    maxHunksPerFile: 2,
+    maxLinesPerHunk: 5,
+    maxLinesPerFile: 16,
+    maxTotalLines: 32,
+  });
+  if (diff) pages.push(...splitMarkdownPages(diff, WECOM_FINAL_PAGE_LIMIT));
+
+  return labelPages(pages.length ? pages : ['暂无输出']);
 }
 
 export function renderWeComPayload(payload) {
@@ -44,26 +85,46 @@ export function renderWeComPayload(payload) {
     const status = String(payload.status || 'Done');
     const marker = String(payload.marker || '').toLowerCase();
     const elapsedText = formatElapsedSeconds(payload.elapsedSeconds || 0);
-    const preview = String(payload.text || '')
+    const previewModel = resolvePreviewModel(payload);
+    const preview = sanitizePreview(previewModel.content || payload.text || '', status)
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
       .trim();
     const previewLower = preview.toLowerCase();
 
     if (status === 'Running' && (marker === 'thinking' || previewLower === 'thinking...' || previewLower.startsWith('thinking\n') || !preview)) {
-      const detail = preview.replace(/^thinking(?:\.\.\.)?/i, '').trim();
       const frame = THINKING_SPINNER_FRAMES[Math.floor((Number(payload.elapsedSeconds) || 0) * 2) % THINKING_SPINNER_FRAMES.length];
       const dots = '.'.repeat((Math.floor((Number(payload.elapsedSeconds) || 0) * 2) % 3) + 1);
       const lines = [`${frame} Thinking${dots}`];
-      const detailText = formatThinkingDetail(detail);
-      if (detailText) lines.push(detailText);
       lines.push(elapsedText);
-      return clipMessage(lines.join('\n'));
+      const content = clipMessage(lines.join('\n'));
+      return { content, pages: [content] };
     }
 
-    const body = preview || (status === 'Running' ? 'Thinking...' : '暂无输出');
-    return clipMessage(status === 'Running' ? `${body}\n${elapsedText}` : body);
+    if (status === 'Done') {
+      const pages = buildWeComStructuredPages(previewModel);
+      return {
+        content: pages[0] || '暂无输出',
+        pages,
+      };
+    }
+
+    const body = buildPreviewSummaryMarkdown(previewModel, {
+      heading: progressHeading(previewModel),
+      maxHighlights: 2,
+      maxChecks: 1,
+      maxFiles: 3,
+      maxNotes: 0,
+      includeDiffHint: previewModel.phase === 'diff',
+    }) || preview || (status === 'Running' ? 'Thinking...' : '暂无输出');
+    const content = clipMessage(status === 'Running' ? `${body}\n${elapsedText}` : body);
+    return { content, pages: [content] };
   }
 
-  return clipMessage(String(payload || '').trim() || '暂无输出');
+  const previewModel = buildStructuredPreview(String(payload || ''), { status: 'Done', marker: 'assistant' });
+  const pages = buildWeComStructuredPages(previewModel);
+  return {
+    content: pages[0] || '暂无输出',
+    pages,
+  };
 }

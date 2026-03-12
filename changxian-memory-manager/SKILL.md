@@ -34,11 +34,11 @@ Use this skill only for durable memory. Do not treat it as a scratchpad for one-
 
 When persistent memory should change, append exactly one fenced block at the very end of the answer:
 
-```tg-memory-ops
+```rc-memory-ops
 {"ops":[...]}
 ```
 
-The host runtime consumes `tg-memory-ops` and persists the resulting memory changes.
+The host runtime consumes `rc-memory-ops` and persists the resulting memory changes.
 
 Supported operations:
 
@@ -64,12 +64,12 @@ Supported fields:
 
 User says: “记住：以后默认中文回答，先给结论再展开。”
 
-```tg-memory-ops
+```rc-memory-ops
 {"ops":[{"op":"upsert","kind":"preference","title":"默认回复风格","content":"默认使用中文回答，并且先给结论再展开。","tags":["preference","language","format"],"importance":8,"pinned":true}]}
 ```
 
 User says: “忘掉我之前说的英文优先。”
 
-```tg-memory-ops
+```rc-memory-ops
 {"ops":[{"op":"delete","query":"英文优先"}]}
 ```

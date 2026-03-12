@@ -21,13 +21,15 @@ function createWeComPushSink(client, binding) {
     },
     async final(message) {
       if (!target) return;
-      const content = renderWeComPayload(message);
-      await client.sendMessage(target, {
-        msgtype: 'markdown',
-        markdown: { content },
-      }).catch((error) => {
-        console.warn('[wecom] failed to push proactive message', errorText(error));
-      });
+      const rendered = renderWeComPayload(message);
+      for (const content of rendered.pages || [rendered.content]) {
+        await client.sendMessage(target, {
+          msgtype: 'markdown',
+          markdown: { content },
+        }).catch((error) => {
+          console.warn('[wecom] failed to push proactive message', errorText(error));
+        });
+      }
     },
   };
 }
@@ -137,8 +139,7 @@ export async function startWeComAdapter(config, controller) {
     let finished = false;
     let sendChain = Promise.resolve();
 
-    const sendStream = (payload, finish) => {
-      const content = renderWeComPayload(payload);
+    const sendStream = (content, finish) => {
       sendChain = sendChain
         .catch(() => {})
         .then(async () => {
@@ -155,10 +156,15 @@ export async function startWeComAdapter(config, controller) {
     const sink = {
       async progress(message) {
         if (finished) return;
-        await sendStream(message, false);
+        const rendered = renderWeComPayload(message);
+        await sendStream(rendered.content, false);
       },
       async final(message) {
-        await sendStream(message, true);
+        const rendered = renderWeComPayload(message);
+        const pages = rendered.pages || [rendered.content];
+        for (let index = 0; index < pages.length; index += 1) {
+          await sendStream(pages[index], index === pages.length - 1);
+        }
       },
     };
 

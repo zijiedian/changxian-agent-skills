@@ -1,5 +1,11 @@
 import { spawn } from 'node:child_process';
-import { cleanOutput as sharedCleanOutput, extractPreview as sharedExtractPreview, sanitizePreview as sharedSanitizePreview } from './utils.mjs';
+import {
+  buildStructuredPreview as sharedBuildStructuredPreview,
+  cleanOutput as sharedCleanOutput,
+  extractPreview as sharedExtractPreview,
+  extractStructuredPreview as sharedExtractStructuredPreview,
+  sanitizePreview as sharedSanitizePreview,
+} from './utils.mjs';
 
 export async function* runCommand(cmd, args, { cwd, timeoutSeconds }) {
   const proc = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -43,4 +49,12 @@ export function sanitizePreview(output, status = 'Done') {
 
 export function extractPreview(output, status = 'Done') {
   return sharedExtractPreview(output, status);
+}
+
+export function buildStructuredPreview(output, options = {}) {
+  return sharedBuildStructuredPreview(output, options);
+}
+
+export function extractStructuredPreview(output, status = 'Done') {
+  return sharedExtractStructuredPreview(output, status);
 }

@@ -16,10 +16,17 @@ export async function startTelegramAdapter(config, controller) {
 
   const bot = new Bot(config.tgBotToken);
   const menuCommands = COMMAND_SPECS.map((spec) => ({ command: spec.name, description: spec.menuDescription }));
+  let commandsSyncInFlight = false;
+
+  function recordError(error, prefix = '[telegram] error') {
+    status.connected = false;
+    status.authenticated = false;
+    status.lastError = error?.error?.message || error?.message || String(error);
+    console.error(prefix, error?.error || error);
+  }
 
   bot.catch((err) => {
-    status.lastError = err?.error?.message || err?.message || String(err);
-    console.error('[telegram] error', err.error || err);
+    recordError(err, '[telegram] middleware error');
   });
 
   bot.on('message:text', async (ctx) => {
@@ -35,13 +42,26 @@ export async function startTelegramAdapter(config, controller) {
     }, sink);
   });
 
-  const me = await bot.api.getMe();
-  status.connected = true;
-  status.authenticated = true;
-  status.botUsername = me.username || null;
-  status.lastError = null;
-  await bot.api.setMyCommands(menuCommands);
-  bot.start();
+  bot.start({
+    onStart(me) {
+      status.connected = true;
+      status.authenticated = true;
+      status.botUsername = me.username || null;
+      status.lastError = null;
+      if (!commandsSyncInFlight) {
+        commandsSyncInFlight = true;
+        void bot.api.setMyCommands(menuCommands)
+          .catch((error) => {
+            console.warn('[telegram] failed to sync menu commands', error?.description || error?.message || error);
+          })
+          .finally(() => {
+            commandsSyncInFlight = false;
+          });
+      }
+    },
+  }).catch((error) => {
+    recordError(error, '[telegram] polling stopped');
+  });
 
   return {
     name: 'telegram',
@@ -101,6 +121,13 @@ function createTelegramSink(ctx) {
     }
   }
 
+  async function sendAdditionalPages(pages) {
+    for (const page of pages) {
+      if (!page) continue;
+      await ctx.reply(page, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+    }
+  }
+
   return {
     async progress(payload) {
       const rendered = renderTelegramPayload(payload);
@@ -111,7 +138,9 @@ function createTelegramSink(ctx) {
     },
     async final(payload) {
       const rendered = renderTelegramPayload(payload);
-      await upsertMessage(rendered.html);
+      const [firstPage, ...extraPages] = rendered.pages || [rendered.html];
+      await upsertMessage(firstPage || rendered.html);
+      await sendAdditionalPages(extraPages);
       await sendImages(rendered.images);
     },
   };
@@ -150,6 +179,14 @@ function createTelegramPushSink(bot, binding) {
     }
   }
 
+  async function sendAdditionalPages(pages) {
+    if (!chatId) return;
+    for (const page of pages) {
+      if (!page) continue;
+      await bot.api.sendMessage(chatId, page, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+    }
+  }
+
   return {
     async progress(payload) {
       const rendered = renderTelegramPayload(payload);
@@ -157,7 +194,9 @@ function createTelegramPushSink(bot, binding) {
     },
     async final(payload) {
       const rendered = renderTelegramPayload(payload);
-      await upsertMessage(rendered.html);
+      const [firstPage, ...extraPages] = rendered.pages || [rendered.html];
+      await upsertMessage(firstPage || rendered.html);
+      await sendAdditionalPages(extraPages);
       await sendImages(rendered.images);
     },
   };

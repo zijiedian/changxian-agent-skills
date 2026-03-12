@@ -3,13 +3,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveCommand, helpLines } from './commands.mjs';
-import { extractPreview } from './codex.mjs';
+import { extractStructuredPreview } from './codex.mjs';
 import { redactedCommandText, truncateText } from './utils.mjs';
+
+const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[CURRENT TASK]'];
+
+function balanceMarkdownFences(text) {
+  const value = String(text || '').trimEnd();
+  const fenceCount = (value.match(/^\s*```/gm) || []).length;
+  return fenceCount % 2 === 0 ? value : `${value}\n\`\`\``;
+}
 
 function clip(text, limit = 3500) {
   const value = String(text || '').trim() || '(empty)';
   if (value.length <= limit) return value;
-  return value.slice(0, Math.max(0, limit - 15)).trimEnd() + '\n\n[truncated]';
+  const clipped = balanceMarkdownFences(value.slice(0, Math.max(0, limit - 15)));
+  return `${clipped}\n\n[truncated]`;
 }
 
 function shellEscape(value) {
@@ -44,20 +53,14 @@ function timingSafeMatch(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function cleanThinkingPreview(text, prompt) {
-  const promptText = String(prompt || '').trim();
-  const kept = [];
-  for (const line of String(text || '').split('\n')) {
-    const stripped = line.trim();
-    if (!stripped) continue;
-    const lowered = stripped.toLowerCase();
-    if (lowered === 'thinking' || lowered === 'thinking...') continue;
-    if (promptText && stripped === promptText) continue;
-    if (/^\d{4}-\d{2}-\d{2}t.*\b(?:warn|info|error|debug)\b/i.test(stripped)) continue;
-    if (/codex_core::shell_snapshot|failed to delete shell snapshot/i.test(stripped)) continue;
-    kept.push(stripped);
-  }
-  return kept.length ? `thinking\n${kept.join('\n')}` : 'thinking...';
+function looksLikeContextPreview(text, prompt) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  if (CONTEXT_PREVIEW_MARKERS.some((marker) => value.includes(marker))) return true;
+
+  const normalizedPrompt = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const normalizedValue = value.replace(/\s+/g, ' ').trim();
+  return Boolean(normalizedPrompt && (normalizedValue === normalizedPrompt || normalizedValue.startsWith(normalizedPrompt)));
 }
 
 export class RuntimeController {
@@ -569,6 +572,7 @@ export class RuntimeController {
     await sink.progress({ status: 'Running', marker: 'thinking', text: 'thinking...', elapsedSeconds: 0 });
 
     let output = '';
+    let previewOutput = '';
     let lastProgressKey = '';
     let progressTickRunning = false;
     const timeoutMs = this.config.codexTimeoutSeconds * 1000;
@@ -577,9 +581,11 @@ export class RuntimeController {
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     const onChunk = (chunk) => {
-      output += String(chunk || '');
-      if (output.length > this.config.maxBufferedOutputChars) {
-        output = output.slice(-this.config.maxBufferedOutputChars);
+      const text = String(chunk || '');
+      output += text;
+      previewOutput += text;
+      if (previewOutput.length > this.config.maxBufferedOutputChars) {
+        previewOutput = previewOutput.slice(-this.config.maxBufferedOutputChars);
       }
     };
 
@@ -588,19 +594,32 @@ export class RuntimeController {
       progressTickRunning = true;
       try {
         const elapsedSeconds = (Date.now() - started) / 1000;
-        const elapsedBucket = Math.floor(elapsedSeconds);
-        const preview = extractPreview(output, 'Running');
-        const previewContent = preview.marker === 'thinking'
-          ? cleanThinkingPreview(preview.content || 'thinking...', request.text)
-          : (preview.content || 'thinking...');
-        const previewBody = clip(previewContent, 3000);
-        const progressKey = `${preview.marker}\n${previewBody}\n${elapsedBucket}`;
+        const elapsedBucket = Math.floor(elapsedSeconds / 15);
+        const preview = extractStructuredPreview(previewOutput, 'Running');
+        const suppressed = preview.marker === 'thinking' || looksLikeContextPreview(preview.content, request.text);
+        const progressMarker = suppressed ? 'thinking' : preview.marker;
+        const previewContent = suppressed
+          ? 'thinking...'
+          : (preview.summary || preview.highlights[0] || preview.commandPreview || preview.content || 'thinking...');
+        const previewBody = progressMarker === 'thinking'
+          ? 'thinking...'
+          : clip(previewContent, 3000);
+        const progressKey = [
+          progressMarker,
+          preview.phase || '',
+          preview.summary || '',
+          preview.highlights[0] || '',
+          preview.commandPreview || '',
+          preview.changedFiles.slice(0, 3).join(','),
+          elapsedBucket,
+        ].join('\n');
         if (progressKey === lastProgressKey) return;
         lastProgressKey = progressKey;
         await sink.progress({
           status: 'Running',
-          marker: preview.marker,
+          marker: progressMarker,
           text: previewBody,
+          preview,
           elapsedSeconds,
         });
       } finally {
@@ -631,7 +650,7 @@ export class RuntimeController {
       return { success: false, summary: errorText, errorText };
     }
 
-    const previewInfo = extractPreview(output, 'Done');
+    const previewInfo = extractStructuredPreview(output, 'Done');
     const preview = previewInfo.content || output.trim() || '(empty output)';
     const sessionId = this.extractSessionId(output);
     if (sessionId) {
@@ -645,7 +664,8 @@ export class RuntimeController {
     await sink.final({
       status: 'Done',
       marker: previewInfo.marker,
-      text: clip(preview),
+      text: preview,
+      preview: previewInfo,
       elapsedSeconds: (Date.now() - started) / 1000,
     });
     return { success: true, summary: truncateText(preview, 240), cleanedOutput: preview, sessionId };

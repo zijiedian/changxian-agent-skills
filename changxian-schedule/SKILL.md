@@ -21,11 +21,11 @@ Use this skill only for scheduled-job lifecycle management. Treat every job as a
 
 When schedule state should change, append exactly one fenced block at the very end of the answer:
 
-```tg-schedule-ops
+```rc-schedule-ops
 {"ops":[...]}
 ```
 
-The host runtime consumes `tg-schedule-ops` and persists the resulting job changes.
+The host runtime consumes `rc-schedule-ops` and persists the resulting job changes.
 
 Supported operations:
 
@@ -56,12 +56,12 @@ Supported fields:
 
 User says: “每天早上 9 点检查 changxian-agent issue，并总结给我。”
 
-```tg-schedule-ops
+```rc-schedule-ops
 {"ops":[{"op":"create_job","schedule_type":"cron","schedule_expr":"0 9 * * *","timezone":"Asia/Shanghai","prompt":"check changxian-agent open issues and send a concise summary"}]}
 ```
 
 User says: “把 job_123 改成每 6 小时执行一次。”
 
-```tg-schedule-ops
+```rc-schedule-ops
 {"ops":[{"op":"set_job","job_id":"job_123","schedule_type":"every","schedule_expr":"6h"}]}
 ```

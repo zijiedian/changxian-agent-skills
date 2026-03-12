@@ -34,6 +34,7 @@ const PATCH_ADD_PREFIX = '*** Add File: ';
 const PATCH_DELETE_PREFIX = '*** Delete File: ';
 const PATCH_MOVE_PREFIX = '*** Move to: ';
 const PATCH_END_OF_FILE_MARKER = '*** End of File';
+const PAGINATION_HEADER_RESERVE = 32;
 
 export function truncateText(text, limit = 120) {
   const stripped = String(text || '').replace(/\s+/g, ' ').trim();
@@ -156,12 +157,19 @@ function patchHeaderLines(oldPath, newPath) {
   ];
 }
 
+function isDiffChangeLine(line) {
+  const value = String(line || '');
+  return value.startsWith(' ') || value.startsWith('+') || value.startsWith('-');
+}
+
 function looksLikeUnfencedDiff(text) {
   const lines = String(text || '').split('\n').filter((line) => line.trim());
   if (!lines.length) return false;
   let sawHeader = false;
   let sawHunk = false;
   let sawChange = false;
+  let sawPlus = false;
+  let sawMinus = false;
 
   for (const line of lines) {
     const stripped = line.trim();
@@ -170,8 +178,10 @@ function looksLikeUnfencedDiff(text) {
       if (stripped.startsWith('@@')) sawHunk = true;
       continue;
     }
-    if (line.startsWith((' ', '+', '-'))) {
+    if (isDiffChangeLine(line)) {
       sawChange = true;
+      if (line.startsWith('+')) sawPlus = true;
+      if (line.startsWith('-')) sawMinus = true;
       continue;
     }
     if (sawHunk && (line.startsWith('    ') || line.startsWith('\t'))) {
@@ -181,7 +191,7 @@ function looksLikeUnfencedDiff(text) {
     return false;
   }
 
-  return sawChange && (sawHeader || sawHunk);
+  return sawChange && (sawHeader || sawHunk || (sawPlus && sawMinus));
 }
 
 function convertApplyPatchBlock(lines) {
@@ -337,11 +347,72 @@ function fenceEmbeddedDiffBlocks(text) {
         index += 1;
         continue;
       }
-      if (current.startsWith((' ', '+', '-'))) {
+      if (isDiffChangeLine(current)) {
         index += 1;
         continue;
       }
       if (sawHunk && (current.startsWith('    ') || current.startsWith('\t'))) {
+        index += 1;
+        continue;
+      }
+      if (!stripped && sawHunk) {
+        index += 1;
+        continue;
+      }
+      break;
+    }
+
+    const block = lines.slice(start, index).join('\n').trim();
+    if (!block || !looksLikeUnfencedDiff(block)) {
+      output.push(...lines.slice(start, index));
+      continue;
+    }
+    if (output.length && output[output.length - 1]) output.push('');
+    output.push('```diff', ...lines.slice(start, index), '```');
+  }
+
+  return output.join('\n').trim();
+}
+
+function fenceEmbeddedChangeOnlyDiffBlocks(text) {
+  const normalized = String(text || '').trim();
+  if (!normalized) return normalized;
+
+  const lines = normalized.split('\n');
+  const output = [];
+  let index = 0;
+  let inFence = false;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (MARKDOWN_FENCE_RE.test(line)) {
+      inFence = !inFence;
+      output.push(line);
+      index += 1;
+      continue;
+    }
+
+    const trimmed = line.trim();
+    const isDiffStart = line.startsWith('+') || line.startsWith('-') || trimmed.startsWith('@@');
+    if (inFence || !isDiffStart) {
+      output.push(line);
+      index += 1;
+      continue;
+    }
+
+    const start = index;
+    let sawHunk = trimmed.startsWith('@@');
+    index += 1;
+    while (index < lines.length) {
+      const current = lines[index];
+      const stripped = current.trim();
+      if (MARKDOWN_FENCE_RE.test(current)) break;
+      if (stripped.startsWith('@@')) {
+        sawHunk = true;
+        index += 1;
+        continue;
+      }
+      if (isDiffChangeLine(current)) {
         index += 1;
         continue;
       }
@@ -374,6 +445,7 @@ function normalizePreviewContent(text) {
   let normalized = convertApplyPatchSections(String(text || '').trim());
   normalized = retagFencedDiffBlocks(normalized);
   normalized = fenceEmbeddedDiffBlocks(normalized);
+  normalized = fenceEmbeddedChangeOnlyDiffBlocks(normalized);
   normalized = ensureDiffFence(normalized);
   return normalized.replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -481,6 +553,804 @@ export function extractPreview(output, status = 'Done') {
 
 export function sanitizePreview(output, status = 'Done') {
   return extractPreview(output, status).content;
+}
+
+function isDiffCodeSegment(segment) {
+  if (!segment || segment.type !== 'code') return false;
+  return segment.lang === 'diff' || looksLikeUnfencedDiff(segment.text);
+}
+
+function splitMarkdownSegments(text) {
+  const segments = [];
+  const lines = String(text || '').split('\n');
+  let textLines = [];
+  let codeLines = [];
+  let inFence = false;
+  let fenceLanguage = '';
+
+  const pushText = () => {
+    const value = textLines.join('\n').trim();
+    if (value) segments.push({ type: 'text', text: value });
+    textLines = [];
+  };
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^\s*```([A-Za-z0-9_+-]*)\s*$/);
+    if (!inFence && fenceMatch) {
+      pushText();
+      inFence = true;
+      fenceLanguage = String(fenceMatch[1] || '').toLowerCase();
+      codeLines = [];
+      continue;
+    }
+    if (inFence && MARKDOWN_FENCE_CLOSE_RE.test(line)) {
+      segments.push({
+        type: 'code',
+        lang: fenceLanguage,
+        text: codeLines.join('\n').trim(),
+      });
+      inFence = false;
+      fenceLanguage = '';
+      codeLines = [];
+      continue;
+    }
+    if (inFence) {
+      codeLines.push(line);
+    } else {
+      textLines.push(line);
+    }
+  }
+
+  if (inFence) {
+    textLines.push(`\`\`\`${fenceLanguage}`);
+    textLines.push(...codeLines);
+  }
+
+  pushText();
+  return segments;
+}
+
+function isDiffSectionLabelLine(line) {
+  return /^(?:file update|patch|diff|changes?|change set|update details|变更详情|修改详情|代码变更)\s*:?\s*$/i.test(String(line || '').trim());
+}
+
+function stripTrailingDiffSectionLabels(text) {
+  const lines = String(text || '').split('\n');
+  while (lines.length && isDiffSectionLabelLine(lines[lines.length - 1])) {
+    lines.pop();
+  }
+  return lines.join('\n').trim();
+}
+
+function stripOuterCodeFence(text) {
+  const lines = String(text || '').split('\n');
+  if (lines.length >= 2 && /^\s*```/.test(lines[0]) && /^\s*```/.test(lines[lines.length - 1])) {
+    return lines.slice(1, -1).join('\n').trim();
+  }
+  return String(text || '').trim();
+}
+
+function normalizeParagraphText(text) {
+  return String(text || '')
+    .replace(/\s*\n\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function stripProgressLabelPrefix(text) {
+  return String(text || '')
+    .replace(/^(?:正在执行命令|执行命令|running command)\s*[:：]\s*/i, '')
+    .trim();
+}
+
+function isWebSearchActivityLine(line) {
+  const value = String(line || '').trim();
+  if (!value) return false;
+  if (/^[🌐🔎🕸️🛰️]/u.test(value)) return true;
+  if (/(?:search(?:ing|ed)?\s+the\s+web|sourced? from|opened:|clicked:|found:)/i.test(value)) return true;
+  if (/^searched\s*:/i.test(value)) return true;
+  if (/https?:\/\/\S+/i.test(value) && /(site:|job|career|campus|招聘|校招|实习|岗位|职位)/i.test(value)) return true;
+  return false;
+}
+
+function isCommandActivityLine(line) {
+  const value = String(line || '').trim();
+  if (!value) return false;
+  if (/^(?:正在执行命令|执行命令|running command)\s*[:：]/i.test(value)) return true;
+  return false;
+}
+
+function classifyActivityLine(line) {
+  if (isCommandActivityLine(line)) return 'command';
+  if (isWebSearchActivityLine(line)) return 'research';
+  return '';
+}
+
+function splitTextActivities(text) {
+  const proseLines = [];
+  const activityGroups = [];
+  let activeGroup = null;
+
+  const flushActivity = () => {
+    if (activeGroup?.lines?.length) {
+      activityGroups.push({
+        kind: activeGroup.kind,
+        lines: activeGroup.lines.slice(),
+      });
+    }
+    activeGroup = null;
+  };
+
+  for (const line of String(text || '').split('\n')) {
+    const kind = classifyActivityLine(line);
+    if (!kind) {
+      flushActivity();
+      proseLines.push(line);
+      continue;
+    }
+    if (!activeGroup || activeGroup.kind !== kind) {
+      flushActivity();
+      activeGroup = { kind, lines: [] };
+    }
+    activeGroup.lines.push(String(line || '').trim());
+  }
+  flushActivity();
+
+  return {
+    prose: proseLines.join('\n').trim(),
+    activities: activityGroups,
+  };
+}
+
+function parseTextBlocks(text) {
+  const blocks = [];
+  const lines = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n');
+  let buffer = [];
+
+  const flush = () => {
+    if (!buffer.length) return;
+    const bulletItems = [];
+    let bulletOnly = true;
+    for (const line of buffer) {
+      const match = line.match(/^\s*(?:[-*+]|\d+\.)\s+(.*)$/);
+      if (!match) {
+        bulletOnly = false;
+        break;
+      }
+      const value = normalizeParagraphText(match[1]);
+      if (value) bulletItems.push(value);
+    }
+
+    if (bulletOnly && bulletItems.length) {
+      blocks.push({ type: 'bullets', items: bulletItems });
+    } else {
+      const value = normalizeParagraphText(buffer.join('\n'));
+      if (value && !isDiffSectionLabelLine(value)) {
+        blocks.push({ type: 'paragraph', text: value });
+      }
+    }
+    buffer = [];
+  };
+
+  for (const line of lines) {
+    if (!String(line || '').trim()) {
+      flush();
+      continue;
+    }
+    buffer.push(line);
+  }
+  flush();
+  return blocks;
+}
+
+function pushUnique(target, seen, value) {
+  const normalized = normalizeParagraphText(value);
+  if (!normalized) return;
+  const key = normalized.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  target.push(normalized);
+}
+
+function isVerificationLine(text) {
+  return /(?:已通过|通过|验证|测试|test|lint|build|compile|编译|生效|重启服务|已完成|成功|无报错|检查通过)/i.test(String(text || ''));
+}
+
+function isCommandLanguage(language) {
+  return ['bash', 'sh', 'zsh', 'shell', 'console'].includes(String(language || '').toLowerCase());
+}
+
+function extractDomainsFromText(text) {
+  const domains = [];
+  const seen = new Set();
+  const pushDomain = (candidate) => {
+    const normalized = String(candidate || '')
+      .trim()
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .replace(/[:/?#].*$/, '')
+      .toLowerCase();
+    if (!normalized || !/\.[a-z]{2,}$/i.test(normalized)) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    domains.push(normalized);
+  };
+
+  const value = String(text || '');
+  for (const match of value.matchAll(/https?:\/\/([^\s<>()]+)/gi)) {
+    pushDomain(match[1]);
+  }
+  for (const match of value.matchAll(/\bsite:([a-z0-9.-]+\.[a-z]{2,})\b/gi)) {
+    pushDomain(match[1]);
+  }
+  return domains;
+}
+
+function summarizeShellCommand(line) {
+  const raw = stripProgressLabelPrefix(line)
+    .replace(/^\/bin\/(?:ba)?sh\s+-lc\s+/i, '')
+    .replace(/^\/bin\/zsh\s+-lc\s+/i, '')
+    .replace(/^['"]|['"]$/g, '')
+    .trim();
+  if (!raw) return '执行命令';
+  if (/python\d?(?:\s|$).*(?:<<['"]?(?:PY|EOF)|-c\b)/i.test(raw)) return '执行 Python 脚本';
+  if (/node(?:\s|$).*(?:<<['"]?(?:JS|NODE|EOF)|--input-type=module|-e\b)/i.test(raw)) return '执行 Node 脚本';
+  if (/\b(?:rg|grep|sed|awk|find|ls|cat)\b/i.test(raw)) return '读取并筛选文件内容';
+  if (/\bcurl\b/i.test(raw)) return '请求网页或接口';
+  if (/\b(?:pytest|go test|npm test|pnpm test|cargo test)\b/i.test(raw)) return '运行测试';
+  if (/\b(?:npm run|pnpm|yarn|npm)\b/i.test(raw)) return '执行项目脚本';
+  if (/\bpython\d?\b/i.test(raw)) return '执行 Python 命令';
+  if (/\bnode\b/i.test(raw)) return '执行 Node 命令';
+  return `执行命令：${truncateText(raw, 72)}`;
+}
+
+function runningCommandSummary(summary) {
+  const value = String(summary || '').trim();
+  if (!value) return '';
+  return `正在${value}`;
+}
+
+function extractCommandPreviewLines(text, limit = 3) {
+  const lines = String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const commands = [];
+  for (const line of lines) {
+    if (!looksLikeShellCommandLine(line)) continue;
+    commands.push(line);
+    if (commands.length >= limit) break;
+  }
+  return commands;
+}
+
+function summarizeActivityGroups(groups, status) {
+  const summaryLines = [];
+  const details = [];
+  const detailSeen = new Set();
+  let phase = '';
+  let commandSummary = '';
+  const sourceDomains = [];
+  const sourceSeen = new Set();
+  let searchLineCount = 0;
+
+  for (const group of groups) {
+    if (group.kind === 'research') {
+      if (!phase) phase = 'research';
+      searchLineCount += group.lines.length;
+      for (const line of group.lines) {
+        for (const domain of extractDomainsFromText(line)) {
+          if (sourceSeen.has(domain)) continue;
+          sourceSeen.add(domain);
+          sourceDomains.push(domain);
+        }
+      }
+      continue;
+    }
+
+    if (group.kind === 'command') {
+      if (!phase) phase = 'exec';
+      const summary = summarizeShellCommand(group.lines[0] || '');
+      if (!commandSummary) commandSummary = summary;
+      pushUnique(details, detailSeen, summary);
+    }
+  }
+
+  if (searchLineCount > 0) {
+    const searchSummary = status === 'Running'
+      ? `正在检索公开资料，已触达 ${Math.max(sourceDomains.length, 1)} 个来源。`
+      : `已检索公开资料，覆盖 ${Math.max(sourceDomains.length, 1)} 个来源。`;
+    pushUnique(summaryLines, new Set(), searchSummary);
+    if (sourceDomains.length) {
+      pushUnique(details, detailSeen, `来源：${sourceDomains.slice(0, 4).join('、')}${sourceDomains.length > 4 ? ` 等 ${sourceDomains.length} 个` : ''}`);
+    }
+  }
+
+  return {
+    phase,
+    summaryLines,
+    details,
+    sourceDomains,
+    commandSummary,
+  };
+}
+
+function shortenDisplayPath(candidate) {
+  let value = String(candidate || '').trim();
+  if (!value || value === '/dev/null') return value;
+  value = value.replace(/^['"]|['"]$/g, '');
+  value = value.replace(/^[ab]\//, '');
+  const parts = value.split('/').filter(Boolean);
+  if (!parts.length) return value;
+  if (parts.length <= 3) return parts.join('/');
+  return `.../${parts.slice(-3).join('/')}`;
+}
+
+function normalizeDiffPath(candidate) {
+  const value = shortenDisplayPath(candidate);
+  return value === '/dev/null' ? '' : value;
+}
+
+function formatDiffRef(candidate) {
+  const value = String(candidate || '').trim();
+  if (!value || value === '/dev/null') return value;
+  if (value.startsWith('a/')) return `a/${shortenDisplayPath(value.slice(2))}`;
+  if (value.startsWith('b/')) return `b/${shortenDisplayPath(value.slice(2))}`;
+  return shortenDisplayPath(value);
+}
+
+function collectChangedFilesFromDiff(text) {
+  const files = [];
+  const seen = new Set();
+  for (const line of String(text || '').split('\n')) {
+    const diffMatch = line.match(/^diff --git\s+(\S+)\s+(\S+)$/);
+    if (diffMatch) {
+      pushUnique(files, seen, normalizeDiffPath(diffMatch[2]) || normalizeDiffPath(diffMatch[1]));
+      continue;
+    }
+    const patchMatch = line.match(/^\*\*\* (?:Update|Add|Delete) File:\s+(.+)$/);
+    if (patchMatch) {
+      pushUnique(files, seen, normalizeDiffPath(patchMatch[1]));
+      continue;
+    }
+    const plusMatch = line.match(/^\+\+\+\s+(\S+)$/);
+    if (plusMatch) {
+      pushUnique(files, seen, normalizeDiffPath(plusMatch[1]));
+    }
+  }
+  return files;
+}
+
+function splitDiffFileChunks(text) {
+  const lines = String(text || '').split('\n');
+  const chunks = [];
+  let current = [];
+
+  for (const line of lines) {
+    if (line.startsWith('diff --git ') && current.length) {
+      chunks.push(current);
+      current = [line];
+      continue;
+    }
+    current.push(line);
+  }
+
+  if (current.some((line) => String(line || '').trim())) {
+    chunks.push(current);
+  }
+  return chunks.length ? chunks : [lines];
+}
+
+function sanitizeDiffDisplayLine(line) {
+  const value = String(line || '');
+  const diffMatch = value.match(/^diff --git\s+(\S+)\s+(\S+)$/);
+  if (diffMatch) {
+    return `diff --git ${formatDiffRef(diffMatch[1])} ${formatDiffRef(diffMatch[2])}`;
+  }
+  const refMatch = value.match(/^(\+\+\+|---)\s+(\S+)$/);
+  if (refMatch) {
+    return `${refMatch[1]} ${formatDiffRef(refMatch[2])}`;
+  }
+  const renameMatch = value.match(/^(rename (?:from|to))\s+(.+)$/);
+  if (renameMatch) {
+    return `${renameMatch[1]} ${shortenDisplayPath(renameMatch[2])}`;
+  }
+  return value;
+}
+
+function compactDiffChunk(lines, options, state) {
+  const output = [];
+  let index = 0;
+  let hunksKept = 0;
+
+  const canPush = () => output.length < options.maxLinesPerFile && state.totalLines < options.maxTotalLines;
+  const push = (line) => {
+    if (!canPush()) return false;
+    output.push(line);
+    state.totalLines += 1;
+    return true;
+  };
+
+  while (index < lines.length) {
+    const line = String(lines[index] || '');
+    if (line.startsWith('@@') || isDiffChangeLine(line)) break;
+    if (line.trim()) push(sanitizeDiffDisplayLine(line));
+    index += 1;
+  }
+
+  while (index < lines.length && hunksKept < options.maxHunksPerFile && canPush()) {
+    while (index < lines.length && !String(lines[index] || '').startsWith('@@')) {
+      if (String(lines[index] || '').startsWith('diff --git ')) break;
+      index += 1;
+    }
+    if (index >= lines.length || String(lines[index] || '').startsWith('diff --git ')) break;
+
+    push(String(lines[index] || ''));
+    index += 1;
+    hunksKept += 1;
+
+    let linesKept = 0;
+    let linesOmitted = 0;
+    while (index < lines.length) {
+      const line = String(lines[index] || '');
+      if (line.startsWith('@@') || line.startsWith('diff --git ')) break;
+      if (linesKept < options.maxLinesPerHunk && canPush()) {
+        push(line);
+        linesKept += 1;
+      } else {
+        linesOmitted += 1;
+      }
+      index += 1;
+    }
+
+    if (linesOmitted > 0 && canPush()) {
+      push(`... ${linesOmitted} lines omitted ...`);
+    }
+  }
+
+  if (index < lines.length && canPush()) {
+    push('... diff truncated ...');
+  }
+
+  return output.join('\n').trim();
+}
+
+export function buildStructuredPreview(content, { status = 'Done', marker = 'assistant' } = {}) {
+  const normalized = String(content || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim();
+
+  const diffBlocks = [];
+  const codeBlocks = [];
+  const proseParts = [];
+  const commandPreviewLines = [];
+  const changedFiles = [];
+  const changedFilesSeen = new Set();
+  const activityGroups = [];
+
+  const segments = splitMarkdownSegments(normalized);
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    const nextSegment = segments[index + 1] || null;
+    if (segment.type === 'text') {
+      let text = segment.text;
+      if (isDiffCodeSegment(nextSegment)) {
+        text = stripTrailingDiffSectionLabels(text);
+      }
+      if (text) {
+        const split = splitTextActivities(text);
+        if (split.prose) proseParts.push(split.prose);
+        if (split.activities.length) activityGroups.push(...split.activities);
+      }
+      continue;
+    }
+
+    if (isDiffCodeSegment(segment)) {
+      const diffText = stripOuterCodeFence(normalizePreviewContent(segment.text));
+      if (diffText) diffBlocks.push(diffText);
+      for (const file of collectChangedFilesFromDiff(diffText)) {
+        pushUnique(changedFiles, changedFilesSeen, file);
+      }
+      continue;
+    }
+
+    const codeText = normalizePreviewContent(segment.text);
+    if (!codeText) continue;
+    codeBlocks.push({ lang: segment.lang || '', text: codeText });
+    const previewLines = isCommandLanguage(segment.lang)
+      ? extractCommandPreviewLines(codeText)
+      : [];
+    for (const line of previewLines) {
+      if (commandPreviewLines.length >= 3) break;
+      commandPreviewLines.push(line);
+    }
+  }
+
+  const activitySummary = summarizeActivityGroups(activityGroups, status);
+
+  const proseText = proseParts.join('\n\n').trim();
+  const blocks = parseTextBlocks(proseText);
+  const highlights = [];
+  const checks = [];
+  const notes = [];
+  const highlightsSeen = new Set();
+  const checksSeen = new Set();
+  const notesSeen = new Set();
+  let summary = '';
+  let summaryTaken = false;
+
+  for (const block of blocks) {
+    if (!summaryTaken && block.type === 'paragraph') {
+      summary = block.text;
+      summaryTaken = true;
+      continue;
+    }
+
+    if (block.type === 'bullets') {
+      for (const item of block.items) {
+        if (isVerificationLine(item)) {
+          pushUnique(checks, checksSeen, item);
+        } else {
+          pushUnique(highlights, highlightsSeen, item);
+        }
+      }
+      continue;
+    }
+
+    if (block.type === 'paragraph') {
+      if (isVerificationLine(block.text)) {
+        pushUnique(checks, checksSeen, block.text);
+      } else {
+        pushUnique(notes, notesSeen, block.text);
+      }
+    }
+  }
+
+  if (!summary) {
+    if (highlights.length) {
+      summary = highlights.shift();
+      highlightsSeen.delete(summary.toLowerCase());
+    } else if (checks.length) {
+      summary = checks[0];
+    } else if (activitySummary.summaryLines.length) {
+      summary = activitySummary.summaryLines[0];
+    } else if (changedFiles.length) {
+      summary = status === 'Running'
+        ? `正在整理 ${changedFiles.length} 个文件的变更。`
+        : `已整理 ${changedFiles.length} 个文件的变更。`;
+    } else if (activitySummary.commandSummary) {
+      summary = status === 'Running'
+        ? `${runningCommandSummary(activitySummary.commandSummary)}。`
+        : `${activitySummary.commandSummary}完成。`;
+    } else if (commandPreviewLines.length) {
+      summary = status === 'Running'
+        ? `${runningCommandSummary(summarizeShellCommand(commandPreviewLines[0]))}。`
+        : `${summarizeShellCommand(commandPreviewLines[0])}完成。`;
+    } else if (normalized) {
+      summary = truncateText(normalizeParagraphText(normalized), 180);
+    }
+  }
+
+  let phase = String(marker || 'assistant').toLowerCase();
+  if (!normalized) phase = status === 'Running' ? 'thinking' : 'assistant';
+  if (activitySummary.phase === 'research' && !changedFiles.length) phase = 'research';
+  if (activitySummary.phase === 'exec' && !changedFiles.length && phase !== 'research') phase = 'exec';
+  if (phase === 'thinking' && changedFiles.length) phase = 'diff';
+  if ((phase === 'assistant' || phase === 'codex') && changedFiles.length) phase = 'diff';
+  if (phase === 'exec' && !commandPreviewLines.length && changedFiles.length) phase = 'diff';
+  if (phase !== 'thinking' && !changedFiles.length && commandPreviewLines.length) phase = 'exec';
+
+  for (const item of activitySummary.summaryLines) {
+    if (item !== summary) pushUnique(highlights, highlightsSeen, item);
+  }
+  for (const item of activitySummary.details) {
+    pushUnique(highlights, highlightsSeen, item);
+  }
+
+  return {
+    status,
+    marker: phase,
+    phase,
+    content: normalized,
+    proseMarkdown: proseText,
+    summary,
+    highlights,
+    checks,
+    notes,
+    changedFiles,
+    diffBlocks,
+    codeBlocks,
+    commandPreview: activitySummary.commandSummary || commandPreviewLines[0] || '',
+    commandPreviewLines,
+    activities: activityGroups,
+    sourceDomains: activitySummary.sourceDomains,
+  };
+}
+
+export function extractStructuredPreview(output, status = 'Done') {
+  const preview = extractPreview(output, status);
+  return buildStructuredPreview(preview.content, {
+    status,
+    marker: preview.marker,
+  });
+}
+
+export function buildPreviewSummaryMarkdown(preview, options = {}) {
+  const value = preview && typeof preview === 'object'
+    ? preview
+    : buildStructuredPreview(String(preview || ''), {});
+  const heading = String(options.heading || '').trim();
+  const maxHighlights = Math.max(0, Number(options.maxHighlights) || 0);
+  const maxChecks = Math.max(0, Number(options.maxChecks) || 0);
+  const maxFiles = Math.max(0, Number(options.maxFiles) || 0);
+  const maxNotes = Math.max(0, Number(options.maxNotes) || 0);
+  const lines = [];
+
+  if (heading) lines.push(`**${heading}**`);
+  if (value.summary) lines.push(value.summary);
+
+  if (maxHighlights > 0 && value.highlights.length) {
+    if (lines.length) lines.push('');
+    for (const item of value.highlights.slice(0, maxHighlights)) {
+      lines.push(`- ${item}`);
+    }
+    const extraHighlights = value.highlights.length - Math.min(value.highlights.length, maxHighlights);
+    if (extraHighlights > 0) lines.push(`- 还有 ${extraHighlights} 条摘要`);
+  }
+
+  if (maxFiles > 0 && value.changedFiles.length) {
+    if (lines.length) lines.push('');
+    lines.push('**涉及文件**');
+    for (const file of value.changedFiles.slice(0, maxFiles)) {
+      lines.push(`- ${file}`);
+    }
+    const extraFiles = value.changedFiles.length - Math.min(value.changedFiles.length, maxFiles);
+    if (extraFiles > 0) lines.push(`- 还有 ${extraFiles} 个文件`);
+  }
+
+  if (maxChecks > 0 && value.checks.length) {
+    if (lines.length) lines.push('');
+    lines.push('**验证**');
+    for (const item of value.checks.slice(0, maxChecks)) {
+      lines.push(`- ${item}`);
+    }
+    const extraChecks = value.checks.length - Math.min(value.checks.length, maxChecks);
+    if (extraChecks > 0) lines.push(`- 还有 ${extraChecks} 条验证结果`);
+  }
+
+  if (maxNotes > 0 && value.notes.length) {
+    if (lines.length) lines.push('');
+    for (const item of value.notes.slice(0, maxNotes)) {
+      lines.push(item);
+    }
+    const extraNotes = value.notes.length - Math.min(value.notes.length, maxNotes);
+    if (extraNotes > 0) lines.push(`还有 ${extraNotes} 条补充说明。`);
+  }
+
+  if (value.diffBlocks.length && options.includeDiffHint !== false) {
+    if (lines.length) lines.push('');
+    lines.push(value.status === 'Running' ? '变更节选整理中。' : '变更节选见后续分页。');
+  }
+
+  return lines.join('\n').trim();
+}
+
+export function buildPreviewDiffMarkdown(preview, options = {}) {
+  const value = preview && typeof preview === 'object'
+    ? preview
+    : buildStructuredPreview(String(preview || ''), {});
+  if (!value.diffBlocks.length) return '';
+
+  const maxFiles = Math.max(1, Number(options.maxFiles) || 3);
+  const compactOptions = {
+    maxFiles,
+    maxHunksPerFile: Math.max(1, Number(options.maxHunksPerFile) || 2),
+    maxLinesPerHunk: Math.max(2, Number(options.maxLinesPerHunk) || 8),
+    maxLinesPerFile: Math.max(8, Number(options.maxLinesPerFile) || 28),
+    maxTotalLines: Math.max(12, Number(options.maxTotalLines) || 80),
+  };
+
+  const fileChunks = value.diffBlocks.flatMap((block) => splitDiffFileChunks(block));
+  if (!fileChunks.length) return '';
+
+  const selectedChunks = [];
+  const state = { totalLines: 0 };
+  for (const chunk of fileChunks) {
+    if (selectedChunks.length >= compactOptions.maxFiles || state.totalLines >= compactOptions.maxTotalLines) break;
+    const compacted = compactDiffChunk(chunk, compactOptions, state);
+    if (compacted) selectedChunks.push(compacted);
+  }
+
+  if (!selectedChunks.length) return '';
+
+  const lines = [];
+  const heading = String(options.heading || '').trim();
+  if (heading) lines.push(heading);
+  if (fileChunks.length > selectedChunks.length) {
+    lines.push(`- 仅展示前 ${selectedChunks.length}/${fileChunks.length} 个文件的变更节选`);
+  }
+  lines.push('```diff');
+  lines.push(selectedChunks.join('\n\n'));
+  lines.push('```');
+  return lines.join('\n').trim();
+}
+
+function splitLineForPagination(line, limit) {
+  const value = String(line || '');
+  if (!value || value.length <= limit) return [value];
+
+  const chunks = [];
+  let offset = 0;
+  while (offset < value.length) {
+    chunks.push(value.slice(offset, offset + limit));
+    offset += limit;
+  }
+  return chunks;
+}
+
+function nextFenceState(currentFence, line) {
+  const trimmed = String(line || '').trim();
+  if (!MARKDOWN_FENCE_RE.test(trimmed)) return currentFence;
+  return currentFence ? null : (trimmed || '```');
+}
+
+function materializePage(lines, openFence) {
+  const output = lines.slice();
+  if (openFence) output.push('```');
+  return output.join('\n').trimEnd();
+}
+
+function hasPageContent(lines, openFence) {
+  if (!lines.length) return false;
+  return !(openFence && lines.length === 1 && lines[0] === openFence);
+}
+
+export function splitMarkdownPages(text, limit = 3200) {
+  const normalized = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim();
+  if (!normalized) return ['暂无输出'];
+
+  const bodyLimit = Math.max(200, Number(limit) || 3200);
+  const splitLimit = Math.max(120, Math.floor((bodyLimit - PAGINATION_HEADER_RESERVE) * 0.75));
+  const lines = normalized
+    .split('\n')
+    .flatMap((line) => splitLineForPagination(line, splitLimit));
+
+  const pages = [];
+  let currentLines = [];
+  let openFence = null;
+
+  const pushCurrentPage = () => {
+    if (!hasPageContent(currentLines, openFence)) return;
+    pages.push(materializePage(currentLines, openFence));
+    currentLines = openFence ? [openFence] : [];
+  };
+
+  for (const line of lines) {
+    const nextFence = nextFenceState(openFence, line);
+    const candidateLines = currentLines.concat(line);
+    const candidateText = materializePage(candidateLines, nextFence);
+    const reopenedFenceOnly = Boolean(openFence && currentLines.length === 1 && currentLines[0] === openFence);
+
+    if (candidateText.length > bodyLimit && currentLines.length && !reopenedFenceOnly) {
+      pushCurrentPage();
+    }
+
+    currentLines.push(line);
+    openFence = nextFence;
+  }
+
+  if (hasPageContent(currentLines, openFence)) {
+    pages.push(materializePage(currentLines, openFence));
+  }
+
+  return pages.length ? pages : ['暂无输出'];
 }
 
 export function maskSensitiveArgs(args) {
