@@ -1,4 +1,0 @@
-interface:
-  display_name: "Changxian Remote Control"
-  short_description: "Run changxian-agent on remote hosts"
-  default_prompt: "Use $changxian-remote-control to adapt work for a remote host bridge with concise progress updates and host-aware behavior."

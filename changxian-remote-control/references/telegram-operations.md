@@ -18,8 +18,7 @@
 
 ## Scheduled Jobs
 
-The reference bridge no longer exposes `/schedule` commands.
-Use `changxian-schedule` with `rc-schedule-ops` blocks to manage scheduled jobs.
+Use `/schedule` commands or emit `rc-schedule-ops` blocks through `changxian-remote-control` to manage scheduled jobs.
 
 Example operation block:
 
@@ -29,6 +28,6 @@ Example operation block:
 
 ## Collaboration With Other Skills
 
-- Use `changxian-memory-manager` for durable preferences and facts.
-- Use `changxian-role-manager` for persistent reusable roles.
-- Use `changxian-schedule` for persistent scheduled-job management.
+- Use `changxian-remote-control` for durable preferences and facts stored in the bridge.
+- Use `changxian-remote-control` for persistent reusable roles.
+- Use `changxian-remote-control` for persistent scheduled-job management.

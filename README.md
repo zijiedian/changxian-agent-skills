@@ -4,9 +4,6 @@ This repository contains the packaged Codex skills used by `changxian-agent` / `
 
 ## Included Skills
 
-- `changxian-memory-manager` - manages long-term chat memory
-- `changxian-role-manager` - manages reusable chat roles
-- `changxian-schedule` - manages scheduled jobs via skill operations
-- `changxian-remote-control` - captures host-bridge remote-control workflows
+- `changxian-remote-control` - captures host-bridge workflows plus bridge-backed memory, roles, and schedules
 
-These skills are bundled into the Telegram bridge and synced into the local Codex skills directory at startup.
+This skill is bundled into the bridge runtime and synced into the local Codex skills directory at startup.

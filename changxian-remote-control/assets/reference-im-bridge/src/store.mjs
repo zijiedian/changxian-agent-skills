@@ -22,8 +22,45 @@ function parseTags(raw) {
   }
 }
 
+function normalizeSearchNeedle(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function memorySearchText(record) {
+  const tags = Array.isArray(record?.tags) ? record.tags : parseTags(record?.tags_json);
+  return [
+    record?.title || '',
+    record?.content || '',
+    tags.join(' '),
+  ].join('\n').toLowerCase();
+}
+
 function stableId(prefix) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
+}
+
+function normalizeWorkdirValue(workdir, { defaultWorkdir, legacyPrefixes = [] }) {
+  const raw = String(workdir || '').trim();
+  if (!raw) return String(defaultWorkdir);
+
+  const resolved = path.resolve(raw);
+  for (const prefix of legacyPrefixes) {
+    const normalizedPrefix = String(prefix || '').trim();
+    if (!normalizedPrefix) continue;
+    if (resolved === normalizedPrefix || resolved.startsWith(`${normalizedPrefix}${path.sep}`)) {
+      return String(defaultWorkdir);
+    }
+  }
+
+  try {
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+      return String(defaultWorkdir);
+    }
+  } catch {
+    return String(defaultWorkdir);
+  }
+
+  return resolved;
 }
 
 export class StateStore {
@@ -97,6 +134,24 @@ export class StateStore {
       CREATE TABLE IF NOT EXISTS job_sessions (job_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS host_bindings (host TEXT NOT NULL, chat_id TEXT NOT NULL, external_chat_id TEXT, external_user_id TEXT, payload_json TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(host, chat_id));
     `);
+  }
+
+  normalizeLegacyWorkdirs({ defaultWorkdir, legacyPrefixes = [] }) {
+    const normalize = (value) => normalizeWorkdirValue(value, { defaultWorkdir, legacyPrefixes });
+
+    const chatRows = this.db.prepare('SELECT chat_id, workdir FROM chat_workdirs').all();
+    for (const row of chatRows) {
+      const nextWorkdir = normalize(row.workdir);
+      if (nextWorkdir === row.workdir) continue;
+      this.setChatWorkdir(row.chat_id, nextWorkdir);
+    }
+
+    const jobRows = this.db.prepare('SELECT id, chat_id, workdir FROM scheduled_jobs').all();
+    for (const row of jobRows) {
+      const nextWorkdir = normalize(row.workdir);
+      if (nextWorkdir === row.workdir) continue;
+      this.updateJob(row.chat_id, row.id, { workdir: nextWorkdir });
+    }
   }
 
   close() {
@@ -226,7 +281,28 @@ export class StateStore {
       : this.db.prepare('SELECT * FROM memories WHERE chat_id = ? ORDER BY pinned DESC, importance DESC, updated_at DESC LIMIT ?').all(String(chatId), limit);
     const records = rows.map((row) => ({ ...row, tags: parseTags(row.tags_json), pinned: Boolean(row.pinned) }));
     if (!query) return records;
-    return records.filter((record) => `${record.title}\n${record.content}\n${record.tags.join(' ')}`.toLowerCase().includes(String(query).toLowerCase()));
+    const needle = normalizeSearchNeedle(query);
+    return records.filter((record) => memorySearchText(record).includes(needle));
+  }
+
+  getMemory(chatId, memoryId) {
+    const row = this.db.prepare('SELECT * FROM memories WHERE chat_id = ? AND id = ?').get(String(chatId), String(memoryId));
+    return row ? { ...row, tags: parseTags(row.tags_json), pinned: Boolean(row.pinned) } : null;
+  }
+
+  findMemories(chatId, { scope = null, query = '', contains = '', limit = 200 } = {}) {
+    const normalizedQuery = normalizeSearchNeedle(query);
+    const normalizedContains = normalizeSearchNeedle(contains);
+    const rows = scope
+      ? this.db.prepare('SELECT * FROM memories WHERE chat_id = ? AND scope = ? ORDER BY pinned DESC, importance DESC, updated_at DESC LIMIT ?').all(String(chatId), String(scope), Number(limit))
+      : this.db.prepare('SELECT * FROM memories WHERE chat_id = ? ORDER BY pinned DESC, importance DESC, updated_at DESC LIMIT ?').all(String(chatId), Number(limit));
+    const records = rows.map((row) => ({ ...row, tags: parseTags(row.tags_json), pinned: Boolean(row.pinned) }));
+    return records.filter((record) => {
+      const haystack = memorySearchText(record);
+      if (normalizedQuery && !haystack.includes(normalizedQuery)) return false;
+      if (normalizedContains && !haystack.includes(normalizedContains)) return false;
+      return true;
+    });
   }
 
   addMemory({ chatId, scope, kind, content, title = '', tags = [], importance = 0, pinned = false, sourceType = '', sourceRef = '', expiresAt = null }) {
@@ -253,6 +329,63 @@ export class StateStore {
       VALUES (@id, @chat_id, @scope, @kind, @title, @content, @tags_json, @importance, @pinned, @source_type, @source_ref, @created_at, @updated_at, @last_hit_at, @expires_at)
     `).run(record);
     return { ...record, tags, pinned: Boolean(record.pinned) };
+  }
+
+  upsertMemory({ chatId, memoryId = '', scope, kind, content, title = '', tags = [], importance = 0, pinned = false, sourceType = '', sourceRef = '', expiresAt = null }) {
+    const existing = memoryId ? this.getMemory(chatId, memoryId) : null;
+    if (!existing) {
+      const created = this.addMemory({
+        chatId,
+        scope,
+        kind,
+        content,
+        title,
+        tags,
+        importance,
+        pinned,
+        sourceType,
+        sourceRef,
+        expiresAt,
+      });
+      if (memoryId && created.id !== String(memoryId)) {
+        this.db.prepare('UPDATE memories SET id = ? WHERE id = ? AND chat_id = ?').run(String(memoryId), created.id, String(chatId));
+        return this.getMemory(chatId, memoryId);
+      }
+      return created;
+    }
+
+    const now = nowTs();
+    const record = {
+      id: String(existing.id),
+      chat_id: String(chatId),
+      scope: String(scope ?? existing.scope),
+      kind: String(kind ?? existing.kind),
+      title: String(title ?? existing.title),
+      content: String(content ?? existing.content),
+      tags_json: JSON.stringify(Array.isArray(tags) ? tags : existing.tags),
+      importance: Number.isFinite(Number(importance)) ? Number(importance) : Number(existing.importance),
+      pinned: pinned ? 1 : 0,
+      source_type: String(sourceType ?? existing.source_type ?? ''),
+      source_ref: String(sourceRef ?? existing.source_ref ?? ''),
+      expires_at: expiresAt ?? existing.expires_at ?? null,
+      updated_at: now,
+    };
+    this.db.prepare(`
+      UPDATE memories
+      SET scope = @scope,
+          kind = @kind,
+          title = @title,
+          content = @content,
+          tags_json = @tags_json,
+          importance = @importance,
+          pinned = @pinned,
+          source_type = @source_type,
+          source_ref = @source_ref,
+          expires_at = @expires_at,
+          updated_at = @updated_at
+      WHERE chat_id = @chat_id AND id = @id
+    `).run(record);
+    return this.getMemory(chatId, record.id);
   }
 
   setMemoryPinned(chatId, memoryId, pinned) {
@@ -332,6 +465,91 @@ export class StateStore {
     const info = this.db.prepare('DELETE FROM scheduled_jobs WHERE chat_id = ? AND id = ?').run(String(chatId), String(jobId));
     this.db.prepare('DELETE FROM job_sessions WHERE job_id = ?').run(String(jobId));
     return info.changes > 0;
+  }
+
+  createJob({
+    chatId,
+    ownerUserId = '',
+    name,
+    scheduleType,
+    scheduleExpr,
+    timezone,
+    promptTemplate,
+    role = '',
+    memoryScope = '',
+    workdir = '',
+    commandPrefix = '',
+    sessionPolicy = 'resume-job',
+    concurrencyPolicy = 'skip',
+    nextRunAt = null,
+    lastRunAt = null,
+    enabled = true,
+  }) {
+    const now = nowTs();
+    const id = stableId('job');
+    this.db.prepare(`
+      INSERT INTO scheduled_jobs (
+        id, chat_id, owner_user_id, name, schedule_type, schedule_expr, timezone, prompt_template,
+        role, memory_scope, workdir, command_prefix, session_policy, concurrency_policy,
+        next_run_at, last_run_at, enabled, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      String(chatId),
+      ownerUserId == null ? null : String(ownerUserId),
+      String(name),
+      String(scheduleType),
+      String(scheduleExpr),
+      String(timezone),
+      String(promptTemplate),
+      String(role),
+      String(memoryScope),
+      String(workdir),
+      String(commandPrefix),
+      String(sessionPolicy),
+      String(concurrencyPolicy),
+      nextRunAt == null ? null : Number(nextRunAt),
+      lastRunAt == null ? null : Number(lastRunAt),
+      enabled ? 1 : 0,
+      now,
+      now,
+    );
+    return this.getJob(chatId, id);
+  }
+
+  updateJob(chatId, jobId, patch) {
+    const fields = [];
+    const values = [];
+    const allowed = {
+      owner_user_id: (value) => value == null ? null : String(value),
+      name: (value) => String(value),
+      schedule_type: (value) => String(value),
+      schedule_expr: (value) => String(value),
+      timezone: (value) => String(value),
+      prompt_template: (value) => String(value),
+      role: (value) => String(value),
+      memory_scope: (value) => String(value),
+      workdir: (value) => String(value),
+      command_prefix: (value) => String(value),
+      session_policy: (value) => String(value),
+      concurrency_policy: (value) => String(value),
+      next_run_at: (value) => value == null ? null : Number(value),
+      last_run_at: (value) => value == null ? null : Number(value),
+      enabled: (value) => value ? 1 : 0,
+    };
+
+    for (const [column, normalize] of Object.entries(allowed)) {
+      if (!Object.prototype.hasOwnProperty.call(patch, column)) continue;
+      fields.push(`${column} = ?`);
+      values.push(normalize(patch[column]));
+    }
+    if (!fields.length) return this.getJob(chatId, jobId);
+
+    fields.push('updated_at = ?');
+    values.push(nowTs(), String(chatId), String(jobId));
+    const info = this.db.prepare(`UPDATE scheduled_jobs SET ${fields.join(', ')} WHERE chat_id = ? AND id = ?`).run(...values);
+    return info.changes > 0 ? this.getJob(chatId, jobId) : null;
   }
 
   saveHostBinding(host, chatId, binding) {

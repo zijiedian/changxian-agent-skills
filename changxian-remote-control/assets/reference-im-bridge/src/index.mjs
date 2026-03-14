@@ -1,4 +1,5 @@
 import http from 'node:http';
+import path from 'node:path';
 import process from 'node:process';
 
 import { loadConfig } from './config.mjs';
@@ -6,17 +7,36 @@ import { StateStore } from './store.mjs';
 import { RuntimeController } from './controller.mjs';
 import { startTelegramAdapter } from './adapters.telegram.mjs';
 import { startWeComAdapter } from './adapters.wecom.mjs';
+import { setupBridgeLogger, closeBridgeLogger } from './logger.mjs';
+import { runCommandPreflight } from './preflight.mjs';
 import { SchedulerRuntime } from './scheduler.mjs';
 
 const startedAtMs = Date.now();
 const config = loadConfig();
+setupBridgeLogger({
+  stateDir: config.stateDir,
+  logPath: config.logFile,
+  maxBytes: config.logMaxBytes,
+  maxFiles: config.logMaxFiles,
+});
 const store = new StateStore(config.stateDir);
 store.init();
+store.normalizeLegacyWorkdirs({
+  defaultWorkdir: config.defaultWorkdir,
+  legacyPrefixes: [
+    path.join(config.defaultWorkdir, 'changxian-agent-skills/changxian-remote-control/assets/reference-telegram-bridge'),
+    path.join(config.defaultWorkdir, 'changxian-agent-skills/changxian-remote-control/assets/reference-wecom-bot-bridge'),
+  ],
+});
 const controller = new RuntimeController(config, store);
 const adapters = [];
 const adapterMap = {};
 let readinessTimer = null;
 const requestedAdapters = [];
+const defaultCommandPreflight = runCommandPreflight({
+  commandPrefix: config.codexCommandPrefix,
+  workdir: config.defaultWorkdir,
+});
 if (config.tgBotToken) requestedAdapters.push('telegram');
 if (config.wecomBotId && config.wecomBotSecret) requestedAdapters.push('wecom');
 
@@ -34,6 +54,9 @@ const bootState = {
     elapsedMs: null,
     error: null,
   }])),
+  diagnostics: {
+    defaultCommandPreflight,
+  },
 };
 
 function sinceStartupMs() {
@@ -56,6 +79,10 @@ function bootSnapshot() {
     adapters: Object.fromEntries(
       Object.entries(bootState.adapterLaunch).map(([name, state]) => [name, { ...state }]),
     ),
+    diagnostics: {
+      defaultCommandPreflight: { ...bootState.diagnostics.defaultCommandPreflight },
+      codexSdk: controller.codexSdk.getDiagnostics(),
+    },
   };
 }
 
@@ -66,7 +93,7 @@ function maybeMarkReady(scheduler) {
     const adapter = adapterMap[name];
     return adapter && adapter.status.lastError == null && adapter.status.connected !== false;
   });
-  if (bootState.listeningAt && bootState.launchCompletedAt && schedulerActive && adaptersReady) {
+  if (bootState.listeningAt && bootState.launchCompletedAt && schedulerActive && adaptersReady && bootState.diagnostics.defaultCommandPreflight.ok) {
     bootState.readyAt = new Date().toISOString();
   }
 }
@@ -132,7 +159,8 @@ const server = http.createServer((req, res) => {
     const schedulerState = scheduler.snapshot();
     const ok = requestedAdapters.every((name) => bootState.adapterLaunch[name]?.state !== 'error')
       && Object.values(adapterStatesSnapshot).every((adapter) => !adapter.enabled || adapter.lastError == null)
-      && !schedulerState.lastError;
+      && !schedulerState.lastError
+      && bootState.diagnostics.defaultCommandPreflight.ok;
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
       ok,
@@ -141,6 +169,10 @@ const server = http.createServer((req, res) => {
       boot: bootSnapshot(),
       adapters: adapterStatesSnapshot,
       scheduler: schedulerState,
+      diagnostics: {
+        defaultCommandPreflight: { ...bootState.diagnostics.defaultCommandPreflight },
+        codexSdk: controller.codexSdk.getDiagnostics(),
+      },
     }));
     return;
   }
@@ -192,6 +224,7 @@ async function shutdown(signal) {
   }
   await new Promise((resolve) => server.close(resolve));
   store.close();
+  closeBridgeLogger();
   process.exit(0);
 }
 

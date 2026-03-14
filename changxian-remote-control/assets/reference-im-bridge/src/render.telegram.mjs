@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  buildDetailedProgressMarkdown,
   buildPreviewDiffMarkdown,
+  previewHasProgressDetails,
   buildPreviewSummaryMarkdown,
   buildStructuredPreview,
   sanitizePreview,
@@ -10,6 +12,7 @@ import {
 
 const TELEGRAM_MESSAGE_LIMIT = 3900;
 const TELEGRAM_FINAL_PAGE_LIMIT = 1400;
+const TELEGRAM_RUNNING_PAGE_LIMIT = 2600;
 const THINKING_SPINNER_FRAMES = ['-', '\\', '|', '/'];
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif)$/i;
 const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\((\/[^)\n]+?\.(?:png|jpe?g|webp|gif)(?:[#?][^)\n]+)?)\)/gi;
@@ -241,13 +244,17 @@ function appendElapsedFooter(bodyHtml, elapsedText, compact = false) {
   return bodyHtml.trim() ? `${bodyHtml}\n${footer}` : footer;
 }
 
-function labelPages(pages) {
-  if (pages.length <= 1) return pages;
-  return pages.map((page, index) => `第 ${index + 1}/${pages.length} 页\n\n${page}`);
+function appendThinkingFooter(bodyHtml, elapsedText) {
+  const footer = `<i>用时 <code>${elapsedText}</code></i>`;
+  return bodyHtml.trim() ? `${bodyHtml}\n${footer}` : footer;
 }
 
-function buildTelegramPages(text) {
-  let pages = splitMarkdownPages(text, TELEGRAM_FINAL_PAGE_LIMIT);
+function labelPages(pages) {
+  return pages;
+}
+
+function buildTelegramPages(text, pageLimit = TELEGRAM_FINAL_PAGE_LIMIT) {
+  let pages = splitMarkdownPages(text, pageLimit);
 
   let changed = true;
   while (changed) {
@@ -269,6 +276,12 @@ function buildTelegramPages(text) {
   return labelPages(pages).map((page) => coerceTelegramHtml(page));
 }
 
+function buildTelegramProgressPages(text, elapsedText) {
+  const pages = buildTelegramPages(text, TELEGRAM_RUNNING_PAGE_LIMIT);
+  const resolved = pages.length ? pages : ['<i>暂无输出</i>'];
+  return resolved.map((page) => appendElapsedFooter(page, elapsedText));
+}
+
 function resolvePreviewModel(payload) {
   if (payload?.preview && typeof payload.preview === 'object' && !Array.isArray(payload.preview)) {
     return payload.preview;
@@ -281,8 +294,7 @@ function resolvePreviewModel(payload) {
 function progressHeading(preview) {
   if (preview.phase === 'diff') return '正在整理变更';
   if (preview.phase === 'research') return '正在检索资料';
-  if (preview.phase === 'exec') return '正在执行';
-  return '正在处理';
+  return '';
 }
 
 function buildTelegramStructuredPages(preview) {
@@ -326,12 +338,14 @@ export function renderTelegramPayload(payload) {
     const media = status === 'Done' ? extractTelegramMedia(normalizedText) : { text: normalizedText, images: [] };
     const preview = String(previewModel.content || media.text || '').trim();
     const previewLower = preview.toLowerCase();
+    const hasProgressDetails = previewHasProgressDetails(previewModel);
 
-    if (status === 'Running' && (marker === 'thinking' || previewLower === 'thinking...' || previewLower.startsWith('thinking\n') || !preview)) {
-      const frame = THINKING_SPINNER_FRAMES[Math.floor((Number(payload.elapsedSeconds) || 0) * 2) % THINKING_SPINNER_FRAMES.length];
-      const dots = '.'.repeat((Math.floor((Number(payload.elapsedSeconds) || 0) * 2) % 3) + 1);
+    if (status === 'Running' && (!hasProgressDetails && (marker === 'thinking' || previewLower === 'thinking...' || previewLower.startsWith('thinking\n') || !preview))) {
+      const tick = Math.floor(Number(payload.elapsedSeconds) || 0);
+      const frame = THINKING_SPINNER_FRAMES[tick % THINKING_SPINNER_FRAMES.length];
+      const dots = '.'.repeat((tick % 3) + 1);
       const body = `<i>${escapeHtml(frame)} Thinking${dots}</i>`;
-      const html = appendElapsedFooter(body, elapsedText, true);
+      const html = body;
       return {
         html,
         pages: [html],
@@ -348,19 +362,28 @@ export function renderTelegramPayload(payload) {
       };
     }
 
-    const progressMarkdown = buildPreviewSummaryMarkdown(previewModel, {
+    const progressMarkdown = buildDetailedProgressMarkdown(previewModel, {
       heading: progressHeading(previewModel),
       maxHighlights: 2,
       maxChecks: 1,
       maxFiles: 3,
       maxNotes: 0,
       includeDiffHint: previewModel.phase === 'diff',
-    }) || preview || 'Thinking...';
-    const html = coerceTelegramHtml(progressMarkdown);
-    const streamed = appendElapsedFooter(html, elapsedText);
+      maxDiffFiles: 2,
+      maxHunksPerFile: 2,
+      maxLinesPerHunk: 10,
+      maxLinesPerFile: 32,
+      maxTotalLines: 96,
+    });
+    const fallbackLines = [];
+    const heading = progressHeading(previewModel);
+    if (heading) fallbackLines.push(`**${heading}**`);
+    if (previewModel.summary) fallbackLines.push(previewModel.summary);
+    const resolvedProgressMarkdown = progressMarkdown || fallbackLines.join('\n').trim() || '请稍候。';
+    const pages = buildTelegramProgressPages(resolvedProgressMarkdown, elapsedText);
     return {
-      html: streamed.length <= TELEGRAM_MESSAGE_LIMIT ? streamed : `${streamed.slice(0, TELEGRAM_MESSAGE_LIMIT - 1)}…`,
-      pages: [streamed.length <= TELEGRAM_MESSAGE_LIMIT ? streamed : `${streamed.slice(0, TELEGRAM_MESSAGE_LIMIT - 1)}…`],
+      html: pages[0] || '<i>暂无输出</i>',
+      pages,
       images: media.images,
     };
   }

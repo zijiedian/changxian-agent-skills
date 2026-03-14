@@ -15,6 +15,7 @@ export const OPS_RES = {
 };
 
 export function extractOps(regex, text) {
+  regex.lastIndex = 0;
   const payloads = [];
   const stripped = String(text || '').replace(regex, (_, payload) => {
     if (payload && String(payload).trim()) payloads.push(String(payload).trim());

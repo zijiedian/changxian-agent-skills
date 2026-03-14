@@ -1,0 +1,14 @@
+{
+  "name": "changxian-remote-control-skill",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "help": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts help",
+    "start": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts start",
+    "restart": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts restart",
+    "status": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts status",
+    "logs": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts logs",
+    "doctor": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts doctor",
+    "health": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts health"
+  }
+}

@@ -10,7 +10,7 @@ export const COMMAND_SPECS = [
   { name: 'auth', menuDescription: 'Unlock execution', help: '/auth <passphrase> unlock execution' },
   { name: 'cmd', menuDescription: 'Show or update command prefix', help: '/cmd show or update command prefix' },
   { name: 'setting', menuDescription: 'Show or update bridge settings', help: '/setting show or update runtime settings' },
-  { name: 'backend', menuDescription: 'Switch between Codex and OpenCode', help: '/backend codex|opencode switch execution backend' },
+  { name: 'backend', menuDescription: 'Show or reset the Codex backend', help: '/backend codex reset to the default Codex SDK backend' },
   { name: 'memory', menuDescription: 'Show or manage saved memory', help: '/memory inspect or manage saved memory' },
   { name: 'role', menuDescription: 'Show or manage chat roles', help: '/role inspect or manage chat roles' },
   { name: 'schedule', menuDescription: 'Show or manage scheduled jobs', help: '/schedule inspect or manage scheduled jobs' }

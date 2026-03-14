@@ -1,18 +1,18 @@
 ---
 name: changxian-remote-control
-description: Operate changxian-agent through Telegram, WeCom, chat bots, webhooks, remote UI, or scheduled runtime. Use when the user asks to enable remote control, start or restart the Telegram/WeCom bridge, check remote runtime health, inspect bridge status, change remote workdir/runtime settings, or run tasks through a remote host instead of the local terminal. Also trigger for Chinese requests such as “开启远控”, “启动 Telegram 机器人”, “重启桥接”, “查看远控状态”, “检查 healthz”, or “远程处理这个项目”.
+description: Operate changxian-agent through Telegram, WeCom, chat bots, webhooks, or other remote-host bridges, including bridge runtime management plus bridge-backed durable memory, reusable roles, and scheduled jobs. Use when the user asks to enable remote control, start or restart the bridge runtime, inspect remote health or adapter status, change remote workdir/runtime settings, run tasks through a remote host instead of the local terminal, or when a turn includes `[MEMORY STATE]`, `[ROLE STATE]`, `[SCHEDULE STATE]`, or asks to remember, forget, pin, unpin, create roles, switch roles, or create, update, pause, resume, run, or delete scheduled jobs through the bridge.
 ---
 
 # Changxian Remote Control
 
-Use this skill only for remote-host behavior. Do not manage durable memory, reusable roles, or schedule state here unless the active host explicitly asks for those host-side actions.
+Use this skill for both remote-host bridge behavior and the persistent bridge state that lives behind it.
 
 ## Working Model
 
 - Treat the host as a control surface with a concrete capability set.
 - Read the current host contract before assuming command names or flows.
 - Talk in terms of capabilities when the exact adapter commands are unknown.
-- Separate immediate actions from persistent host settings.
+- Separate immediate execution from persistent bridge state.
 
 ## Response Style
 
@@ -27,6 +27,43 @@ Use this skill only for remote-host behavior. Do not manage durable memory, reus
 - Check the current bridge process and `/healthz` before and after a start or restart.
 - Prefer the bundled JavaScript runtime in `assets/reference-im-bridge/` unless the host explicitly uses another deployment.
 - Treat runtime config, state dir, PID, and health endpoint as the minimum facts to report back after startup work.
+
+## Persistent State
+
+- Treat `[MEMORY STATE]`, `[ROLE STATE]`, and `[SCHEDULE STATE]` as the authoritative saved state for the current bridge scope.
+- Keep durable memory for stable preferences, facts, and constraints. Do not save secrets or one-off task details.
+- Keep saved roles reusable and stable across turns. Use lowercase hyphenated role names.
+- Keep schedules explicit and auditable. Prefer concrete `once`, `every`, or `cron` expressions.
+- If the user only wants to inspect state, reply normally and do not emit an ops block.
+- Briefly explain real state changes in user-facing prose.
+
+## Output Protocol
+
+When bridge-backed state should change, append exactly one fenced ops block for the changed state at the very end of the answer.
+
+Memory:
+
+```rc-memory-ops
+{"ops":[...]}
+```
+
+Supported ops: `upsert`, `delete`, `pin`, `unpin`
+
+Role:
+
+```rc-role-ops
+{"ops":[...]}
+```
+
+Supported ops: `upsert_role`, `use_role`, `clear_role`, `delete_role`
+
+Schedule:
+
+```rc-schedule-ops
+{"ops":[...]}
+```
+
+Supported ops: `create_job`, `set_job`, `pause_job`, `resume_job`, `run_job`, `delete_job`
 
 ## Host Rules
 
@@ -48,8 +85,13 @@ Resolve relative paths against this skill directory, not the current runtime wor
 ## Bundled Runtime
 
 - The bundled runtime lives in `assets/reference-im-bridge/`.
-- It is a unified JavaScript bridge for Telegram and WeCom with shared auth, memory, role, and schedule state.
-- Prefer running this runtime directly or copying it as a standalone bundle. The legacy Python bridge assets have been removed.
+- It is a unified JavaScript bridge for Telegram and WeCom plus a shared state store that handles `rc-memory-ops`, `rc-role-ops`, and `rc-schedule-ops` inside the same skill.
+- Prefer running this runtime directly or copying it as a standalone bundle. Do not split bridge state management into separate sibling skills.
+
+## Standalone Script
+
+- Use `scripts/remote-control.ts` as the standalone launcher for start, stop, restart, and health checks.
+- Run it with `node --no-warnings --experimental-strip-types scripts/remote-control.ts help`.
 
 ## Example Requests
 
@@ -57,6 +99,9 @@ Resolve relative paths against this skill directory, not the current runtime wor
 - “重启远控桥接，顺手检查 healthz。”
 - “查看远控状态，看看机器人是不是还在线。”
 - “把这个项目接到企微里远程处理。”
+- “记住以后默认中文回答，并固定在这个桥接会话里。”
+- “创建一个 reviewer 角色，以后默认用它。”
+- “每天早上 9 点自动检查远控服务状态并总结给我。”
 - “以后默认在这个目录下远程处理这个项目。”
 - “我给你发一张截图，你帮我远程定位问题。”
 - “把接下来的执行过程用适合手机阅读的短进度更新返回给我。”

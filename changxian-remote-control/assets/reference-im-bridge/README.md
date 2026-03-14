@@ -5,7 +5,8 @@ Unified JavaScript runtime for changxian remote-control.
 - Telegram adapter: `grammy`
 - WeCom adapter: `@wecom/aibot-node-sdk`
 - Shared state: `better-sqlite3`
-- Shared auth, command registry, memory, role, and schedule core
+- Shared auth, command registry, and host state store
+- Durable memory, reusable roles, and scheduled jobs are managed inside `changxian-remote-control` via `rc-memory-ops`, `rc-role-ops`, and `rc-schedule-ops`
 
 ## Quick Start
 
@@ -28,3 +29,4 @@ Only adapters with valid credentials are started.
 - Default state dir: `$CODEX_HOME/changxian-agent/remote-control-js` or `~/.codex/changxian-agent/remote-control-js`
 - Health endpoint: `http://127.0.0.1:<RC_PORT>/healthz`
 - Start command: `node ./src/index.mjs`
+- Wrapper command: `node --experimental-strip-types ../scripts/remote-control.ts start`

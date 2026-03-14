@@ -1,7 +1,7 @@
-function parseDurationSeconds(raw) {
+export function parseDurationSeconds(raw) {
   const text = String(raw || '').trim().toLowerCase();
   if (!text) throw new Error('duration is required');
-  const match = /^(d+)s*([smhd]?)$/.exec(text);
+  const match = /^(\d+)\s*([smhd]?)$/.exec(text);
   if (!match) throw new Error('duration must use s, m, h, or d');
   const amount = Number.parseInt(match[1], 10);
   const unit = match[2] || 's';
@@ -53,8 +53,8 @@ function parseCronField(field, minimum, maximum) {
   return values;
 }
 
-function normalizeCronExpression(expr) {
-  const fields = String(expr || '').trim().split(/s+/);
+export function normalizeCronExpression(expr) {
+  const fields = String(expr || '').trim().split(/\s+/);
   if (fields.length !== 5) throw new Error('cron must contain 5 fields');
   parseCronField(fields[0], 0, 59);
   parseCronField(fields[1], 0, 23);
@@ -89,9 +89,9 @@ function zonedParts(timestampMs, timeZone) {
   };
 }
 
-function nextCronTimestamp(expr, timeZone, nowTs) {
+export function nextCronTimestamp(expr, timeZone, nowTs) {
   const normalized = normalizeCronExpression(expr);
-  const [minuteField, hourField, dayField, monthField, weekdayField] = normalized.split(/s+/);
+  const [minuteField, hourField, dayField, monthField, weekdayField] = normalized.split(/\s+/);
   const minuteValues = parseCronField(minuteField, 0, 59);
   const hourValues = parseCronField(hourField, 0, 23);
   const dayValues = parseCronField(dayField, 1, 31);
@@ -115,12 +115,45 @@ function nextCronTimestamp(expr, timeZone, nowTs) {
   throw new Error('unable to compute next cron run within one year');
 }
 
-function computeNextRun(job, nowTs) {
+export function computeNextRun(job, nowTs) {
   const scheduleType = String(job.schedule_type || '').trim().toLowerCase();
   if (scheduleType === 'once') return { nextRunAt: null, enabled: false };
   if (scheduleType === 'every') return { nextRunAt: nowTs + parseDurationSeconds(job.schedule_expr), enabled: true };
   if (scheduleType === 'cron') return { nextRunAt: nextCronTimestamp(job.schedule_expr, job.timezone, nowTs), enabled: true };
   throw new Error('unsupported schedule type: ' + job.schedule_type);
+}
+
+export function normalizeScheduleSpec({ scheduleType, scheduleExpr, timezone }) {
+  const normalizedType = String(scheduleType || '').trim().toLowerCase();
+  if (!['once', 'every', 'cron'].includes(normalizedType)) {
+    throw new Error('schedule_type must be once, every, or cron');
+  }
+
+  const rawExpr = String(scheduleExpr || '').trim();
+  if (!rawExpr) throw new Error('schedule_expr is required');
+
+  if (normalizedType === 'every') {
+    parseDurationSeconds(rawExpr);
+    return {
+      scheduleType: normalizedType,
+      scheduleExpr: rawExpr.toLowerCase(),
+      timezone: String(timezone || 'Asia/Shanghai').trim() || 'Asia/Shanghai',
+    };
+  }
+
+  if (normalizedType === 'cron') {
+    return {
+      scheduleType: normalizedType,
+      scheduleExpr: normalizeCronExpression(rawExpr),
+      timezone: String(timezone || 'Asia/Shanghai').trim() || 'Asia/Shanghai',
+    };
+  }
+
+  return {
+    scheduleType: normalizedType,
+    scheduleExpr: rawExpr,
+    timezone: String(timezone || 'Asia/Shanghai').trim() || 'Asia/Shanghai',
+  };
 }
 
 function createNullSink() {

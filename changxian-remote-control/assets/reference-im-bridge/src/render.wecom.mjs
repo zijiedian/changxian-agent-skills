@@ -1,5 +1,7 @@
 import {
+  buildDetailedProgressMarkdown,
   buildPreviewDiffMarkdown,
+  previewHasProgressDetails,
   buildPreviewSummaryMarkdown,
   buildStructuredPreview,
   sanitizePreview,
@@ -27,8 +29,7 @@ function formatElapsedSeconds(elapsedSeconds) {
 }
 
 function labelPages(pages) {
-  if (pages.length <= 1) return pages;
-  return pages.map((page, index) => `第 ${index + 1}/${pages.length} 页\n\n${page}`);
+  return pages;
 }
 
 function buildWeComPages(text) {
@@ -47,8 +48,7 @@ function resolvePreviewModel(payload) {
 function progressHeading(preview) {
   if (preview.phase === 'diff') return '正在整理变更';
   if (preview.phase === 'research') return '正在检索资料';
-  if (preview.phase === 'exec') return '正在执行';
-  return '正在处理';
+  return '';
 }
 
 function buildWeComStructuredPages(preview) {
@@ -91,12 +91,14 @@ export function renderWeComPayload(payload) {
       .replace(/\r/g, '\n')
       .trim();
     const previewLower = preview.toLowerCase();
+    const hasProgressDetails = previewHasProgressDetails(previewModel);
 
-    if (status === 'Running' && (marker === 'thinking' || previewLower === 'thinking...' || previewLower.startsWith('thinking\n') || !preview)) {
-      const frame = THINKING_SPINNER_FRAMES[Math.floor((Number(payload.elapsedSeconds) || 0) * 2) % THINKING_SPINNER_FRAMES.length];
-      const dots = '.'.repeat((Math.floor((Number(payload.elapsedSeconds) || 0) * 2) % 3) + 1);
+    if (status === 'Running' && (!hasProgressDetails && (marker === 'thinking' || previewLower === 'thinking...' || previewLower.startsWith('thinking\n') || !preview))) {
+      const tick = Math.floor(Number(payload.elapsedSeconds) || 0);
+      const frame = THINKING_SPINNER_FRAMES[tick % THINKING_SPINNER_FRAMES.length];
+      const dots = '.'.repeat((tick % 3) + 1);
       const lines = [`${frame} Thinking${dots}`];
-      lines.push(elapsedText);
+      lines.push(`用时 ${elapsedText}`);
       const content = clipMessage(lines.join('\n'));
       return { content, pages: [content] };
     }
@@ -109,15 +111,25 @@ export function renderWeComPayload(payload) {
       };
     }
 
-    const body = buildPreviewSummaryMarkdown(previewModel, {
+    const body = buildDetailedProgressMarkdown(previewModel, {
       heading: progressHeading(previewModel),
       maxHighlights: 2,
       maxChecks: 1,
       maxFiles: 3,
       maxNotes: 0,
       includeDiffHint: previewModel.phase === 'diff',
-    }) || preview || (status === 'Running' ? 'Thinking...' : '暂无输出');
-    const content = clipMessage(status === 'Running' ? `${body}\n${elapsedText}` : body);
+      maxDiffFiles: 2,
+      maxHunksPerFile: 2,
+      maxLinesPerHunk: 10,
+      maxLinesPerFile: 32,
+      maxTotalLines: 96,
+    });
+    const fallbackLines = [];
+    const heading = progressHeading(previewModel);
+    if (heading) fallbackLines.push(`**${heading}**`);
+    if (previewModel.summary) fallbackLines.push(previewModel.summary);
+    const resolvedBody = body || fallbackLines.join('\n').trim() || (status === 'Running' ? '请稍候。' : '暂无输出');
+    const content = clipMessage(status === 'Running' ? `${resolvedBody}\n${elapsedText}` : resolvedBody);
     return { content, pages: [content] };
   }
 

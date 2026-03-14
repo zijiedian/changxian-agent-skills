@@ -1,12 +1,15 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { resolveCommand, helpLines } from './commands.mjs';
+import { applyAssistantOps } from './assistant_ops.mjs';
+import { CodexSdkProvider } from './codex-sdk-provider.mjs';
 import { extractStructuredPreview } from './codex.mjs';
+import { buildExecutionEnv, runCommandPreflight } from './preflight.mjs';
 import { redactedCommandText, truncateText } from './utils.mjs';
 
 const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[CURRENT TASK]'];
+const PREFLIGHT_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function balanceMarkdownFences(text) {
   const value = String(text || '').trimEnd();
@@ -19,17 +22,6 @@ function clip(text, limit = 3500) {
   if (value.length <= limit) return value;
   const clipped = balanceMarkdownFences(value.slice(0, Math.max(0, limit - 15)));
   return `${clipped}\n\n[truncated]`;
-}
-
-function shellEscape(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
-}
-
-function stableHash(value) {
-  const digest = crypto.createHash('blake2b512').update(String(value)).digest();
-  let result = 0n;
-  for (const byte of digest.subarray(0, 8)) result = (result << 8n) | BigInt(byte);
-  return String(result & ((1n << 63n) - 1n));
 }
 
 function parseParts(raw) {
@@ -70,6 +62,8 @@ export class RuntimeController {
     this.tasks = new Map();
     this.authSessions = new Map();
     this.scheduler = null;
+    this.preflightCache = new Map();
+    this.codexSdk = new CodexSdkProvider(config, buildExecutionEnv);
   }
 
   attachScheduler(scheduler) {
@@ -116,7 +110,12 @@ export class RuntimeController {
   }
 
   effectiveWorkdir(chatId) {
-    return this.store.getChatWorkdir(chatId) || this.config.defaultWorkdir;
+    const current = this.store.getChatWorkdir(chatId);
+    const normalized = this.normalizeWorkdir(current);
+    if (current && normalized !== current) {
+      this.store.setChatWorkdir(chatId, normalized);
+    }
+    return normalized;
   }
 
   effectiveCommandPrefix(chatId) {
@@ -125,6 +124,27 @@ export class RuntimeController {
 
   displayCommandPrefix(chatId) {
     return redactedCommandText(this.effectiveCommandPrefix(chatId));
+  }
+
+  normalizeWorkdir(workdir) {
+    const value = String(workdir || '').trim();
+    if (!value) return this.config.defaultWorkdir;
+    const resolved = path.resolve(value);
+    const legacyRuntimeDirs = [
+      path.resolve(this.config.defaultWorkdir, 'changxian-agent-skills/changxian-remote-control/assets/reference-telegram-bridge'),
+      path.resolve(this.config.defaultWorkdir, 'changxian-agent-skills/changxian-remote-control/assets/reference-wecom-bot-bridge'),
+    ];
+    if (legacyRuntimeDirs.some((dir) => resolved === dir || resolved.startsWith(`${dir}${path.sep}`))) {
+      return this.config.defaultWorkdir;
+    }
+    try {
+      if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+        return this.config.defaultWorkdir;
+      }
+    } catch {
+      return this.config.defaultWorkdir;
+    }
+    return resolved;
   }
 
   activeRoleName(chatId) {
@@ -197,24 +217,27 @@ export class RuntimeController {
     return sections.join('\n\n');
   }
 
-  extractSessionId(output) {
-    const matches = [...String(output || '').matchAll(/session id:\s*([0-9a-f-]+)/ig)];
-    return matches.length ? matches[matches.length - 1][1] : '';
+  preflightCacheKey(commandPrefix, workdir) {
+    return `${String(commandPrefix || '')}\n${String(workdir || '')}`;
   }
 
-  buildCommand(chatId, prompt, { commandPrefix = '', workdir = '', sessionId = null } = {}) {
-    const prefix = commandPrefix || this.effectiveCommandPrefix(chatId);
-    const resolvedSessionId = sessionId !== null
-      ? String(sessionId || '')
-      : (this.config.enableSessionResume ? this.store.getChatSession(chatId) : '');
-    const resolvedWorkdir = workdir || this.effectiveWorkdir(chatId);
-    let command = prefix;
-    if (resolvedSessionId && !/\bresume\b/.test(prefix)) {
-      command = `${prefix} resume ${shellEscape(resolvedSessionId)} ${shellEscape(prompt)}`;
-    } else {
-      command = `${prefix} ${shellEscape(prompt)}`;
+  executionEnv() {
+    return buildExecutionEnv(process.env);
+  }
+
+  commandPreflight(commandPrefix, workdir) {
+    const key = this.preflightCacheKey(commandPrefix, workdir);
+    const cached = this.preflightCache.get(key);
+    if (cached && Date.now() - cached.checkedAtMs < PREFLIGHT_CACHE_TTL_MS) {
+      return cached.result;
     }
-    return { workdir: resolvedWorkdir, command };
+    const result = runCommandPreflight({
+      commandPrefix,
+      workdir,
+      env: this.executionEnv(),
+    });
+    this.preflightCache.set(key, { checkedAtMs: Date.now(), result });
+    return result;
   }
 
   async handleInput(request, sink) {
@@ -274,11 +297,11 @@ export class RuntimeController {
       return true;
     }
     if (spec.name === 'cancel') {
-      const task = this.getTaskForChat(chatId)?.child;
+      const task = this.getTaskForChat(chatId);
       if (!task) {
         await sink.final('当前没有正在运行的任务。');
       } else {
-        task.kill('SIGTERM');
+        task.cancel();
         await sink.final('已请求取消当前任务。');
       }
       return true;
@@ -318,30 +341,24 @@ export class RuntimeController {
     }
     if (spec.name === 'backend') {
       if (!rest) {
-        await sink.final(this.displayCommandPrefix(chatId));
+        await sink.final('codex');
         return true;
       }
       const value = rest.toLowerCase();
       if (value === 'codex') {
         this.store.clearChatCommandPrefix(chatId);
-        await sink.final(this.displayCommandPrefix(chatId));
+        await sink.final('已切回 Codex SDK 默认后端。');
         return true;
       }
-      if (value === 'opencode') {
-        const prefix = 'opencode run --dir <PROJECT_PATH> -m opencode/minimax-m2.5-free';
-        this.store.setChatCommandPrefix(chatId, prefix);
-        await sink.final(this.displayCommandPrefix(chatId));
-        return true;
-      }
-      await sink.final('Usage\n/backend codex|opencode');
+      await sink.final('当前 runtime 仅支持 Codex SDK。\nUsage\n/backend codex');
       return true;
     }
     if (spec.name === 'memory') {
-      await sink.final(this.handleMemoryCommand(chatId, rest, request));
+      await sink.final(await this.handleMemoryCommand(chatId, rest, request));
       return true;
     }
     if (spec.name === 'role') {
-      await sink.final(this.handleRoleCommand(chatId, rest));
+      await sink.final(await this.handleRoleCommand(chatId, rest));
       return true;
     }
     if (spec.name === 'schedule') {
@@ -398,6 +415,7 @@ export class RuntimeController {
   }
 
   handleSettingCommand() {
+    const codexSdk = this.codexSdk.getDiagnostics();
     return [
       `auth: ${this.isSecondFactorEnabled() ? `enabled (${formatSeconds(this.config.authTtlSeconds)})` : 'disabled'}`,
       `memory: ${this.config.enableMemory ? 'enabled' : 'disabled'}`,
@@ -405,6 +423,13 @@ export class RuntimeController {
       `session_resume: ${this.config.enableSessionResume ? 'enabled' : 'disabled'}`,
       `default_workdir: ${this.config.defaultWorkdir}`,
       `command_prefix: ${redactedCommandText(this.config.codexCommandPrefix)}`,
+      `codex_sdk: ${codexSdk.initialized ? 'initialized' : 'lazy'}`,
+      `codex_model_passthrough: ${codexSdk.modelPassthrough ? 'enabled' : 'disabled'}`,
+      `codex_auth: ${codexSdk.authSource}`,
+      `codex_base_url: ${codexSdk.baseUrlSource}`,
+      ...(codexSdk.lastInitError ? [`codex_last_init_error: ${codexSdk.lastInitError}`] : []),
+      ...(codexSdk.lastResumeSkipReason ? [`codex_last_resume_skip: ${codexSdk.lastResumeSkipReason}`] : []),
+      ...(codexSdk.lastTransientRetryReason ? [`codex_last_transient_retry: ${codexSdk.lastTransientRetryReason}`] : []),
     ].join('\n');
   }
 
@@ -556,119 +581,123 @@ export class RuntimeController {
       return { success: false, skipped: true, summary: 'chat busy', errorText: 'chat already has a running task' };
     }
 
-    const preparedPrompt = this.buildPrompt(chatId, request.text, hostName, {
-      roleName: options.roleName || '',
-      memoryScope: options.memoryScope || '',
-    });
-    const { workdir, command } = this.buildCommand(chatId, preparedPrompt, {
-      commandPrefix: options.commandPrefix || '',
-      workdir: options.workdir || '',
-      sessionId: Object.prototype.hasOwnProperty.call(options, 'sessionId') ? options.sessionId : null,
-    });
+    const commandPrefix = options.commandPrefix || this.effectiveCommandPrefix(chatId);
+    const workdir = this.normalizeWorkdir(options.workdir || this.effectiveWorkdir(chatId));
+    const preflight = this.commandPreflight(commandPrefix, workdir);
+    if (!preflight.ok) {
+      const failedChecks = preflight.checks.filter((check) => !check.ok);
+      const summary = failedChecks[0]?.detail || 'command preflight failed';
+      console.warn(`[runtime] task blocked by preflight host=${taskHost} chat=${chatId} reason=${summary}`);
+      await sink.final([
+        '任务未执行：后端预检失败。',
+        `command: ${preflight.redactedCommandPrefix}`,
+        `workdir: ${preflight.workdir}`,
+        ...failedChecks.slice(0, 4).map((check) => `- ${check.name}: ${check.detail}`),
+      ].join('\n'));
+      return { success: false, skipped: true, summary, errorText: summary };
+    }
 
-    console.info(`[runtime] task start host=${taskHost} chat=${chatId} cwd=${workdir} prompt=${truncateText(request.text, 120)}`);
-    const child = spawn('/bin/zsh', ['-lc', command], { cwd: workdir, stdio: ['ignore', 'pipe', 'pipe'] });
-    this.tasks.set(taskKey, { host: taskHost, chatId, child, startedAt: Date.now() });
-    await sink.progress({ status: 'Running', marker: 'thinking', text: 'thinking...', elapsedSeconds: 0 });
+    return this.runTaskViaSdk({ request, sink, options, taskKey, chatId, taskHost, workdir, commandPrefix });
+  }
 
-    let output = '';
-    let previewOutput = '';
-    let lastProgressKey = '';
-    let progressTickRunning = false;
-    const timeoutMs = this.config.codexTimeoutSeconds * 1000;
+  async runTaskViaSdk({ request, sink, options, taskKey, chatId, taskHost, workdir, commandPrefix }) {
+    console.info(`[runtime] task start(sdk) host=${taskHost} chat=${chatId} cwd=${workdir} prompt=${truncateText(request.text, 120)}`);
     const started = Date.now();
-
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    const onChunk = (chunk) => {
-      const text = String(chunk || '');
-      output += text;
-      previewOutput += text;
-      if (previewOutput.length > this.config.maxBufferedOutputChars) {
-        previewOutput = previewOutput.slice(-this.config.maxBufferedOutputChars);
-      }
-    };
-
-    const emitProgress = async () => {
-      if (progressTickRunning) return;
-      progressTickRunning = true;
-      try {
-        const elapsedSeconds = (Date.now() - started) / 1000;
-        const elapsedBucket = Math.floor(elapsedSeconds / 15);
-        const preview = extractStructuredPreview(previewOutput, 'Running');
-        const suppressed = preview.marker === 'thinking' || looksLikeContextPreview(preview.content, request.text);
-        const progressMarker = suppressed ? 'thinking' : preview.marker;
-        const previewContent = suppressed
-          ? 'thinking...'
-          : (preview.summary || preview.highlights[0] || preview.commandPreview || preview.content || 'thinking...');
-        const previewBody = progressMarker === 'thinking'
-          ? 'thinking...'
-          : clip(previewContent, 3000);
-        const progressKey = [
-          progressMarker,
-          preview.phase || '',
-          preview.summary || '',
-          preview.highlights[0] || '',
-          preview.commandPreview || '',
-          preview.changedFiles.slice(0, 3).join(','),
-          elapsedBucket,
-        ].join('\n');
-        if (progressKey === lastProgressKey) return;
-        lastProgressKey = progressKey;
-        await sink.progress({
-          status: 'Running',
-          marker: progressMarker,
-          text: previewBody,
-          preview,
-          elapsedSeconds,
-        });
-      } finally {
-        progressTickRunning = false;
-      }
-    };
-
-    const progressTimer = setInterval(() => {
-      emitProgress().catch(() => {});
+    const abortController = new AbortController();
+    let leadingThinkingActive = true;
+    const thinkingTicker = setInterval(() => {
+      if (!leadingThinkingActive || abortController.signal.aborted) return;
+      sink.progress({
+        status: 'Running',
+        marker: 'thinking',
+        text: 'thinking...',
+        elapsedSeconds: (Date.now() - started) / 1000,
+      }).catch(() => {});
     }, 1000);
-
-    child.stdout.on('data', onChunk);
-    child.stderr.on('data', onChunk);
-
-    const timeout = setTimeout(() => {
-      child.kill('SIGKILL');
-    }, timeoutMs);
-
-    const code = await new Promise((resolve) => child.on('close', resolve));
-    clearTimeout(timeout);
-    clearInterval(progressTimer);
-    this.tasks.delete(taskKey);
-    console.info(`[runtime] task exit host=${taskHost} chat=${chatId} code=${code} duration_s=${Math.floor((Date.now() - started) / 1000)} output_chars=${output.length}`);
-
-    if (code !== 0) {
-      const errorText = `codex exited with code ${code}`;
-      await sink.final(clip(`Task failed\nReason: ${errorText}`));
-      return { success: false, summary: errorText, errorText };
-    }
-
-    const previewInfo = extractStructuredPreview(output, 'Done');
-    const preview = previewInfo.content || output.trim() || '(empty output)';
-    const sessionId = this.extractSessionId(output);
-    if (sessionId) {
-      if (typeof options.onSessionId === 'function') {
-        options.onSessionId(sessionId);
-      } else {
-        this.store.setChatSession(chatId, sessionId);
-      }
-    }
-    console.info(`[runtime] task final host=${taskHost} chat=${chatId} session=${sessionId || '-'} preview=${truncateText(preview, 160)}`);
-    await sink.final({
-      status: 'Done',
-      marker: previewInfo.marker,
-      text: preview,
-      preview: previewInfo,
-      elapsedSeconds: (Date.now() - started) / 1000,
+    this.tasks.set(taskKey, {
+      host: taskHost,
+      chatId,
+      startedAt: Date.now(),
+      cancel: () => abortController.abort(),
     });
-    return { success: true, summary: truncateText(preview, 240), cleanedOutput: preview, sessionId };
+
+    try {
+      await sink.progress({ status: 'Running', marker: 'thinking', text: 'thinking...', elapsedSeconds: 0 });
+      const preparedPrompt = this.buildPrompt(chatId, request.text, options.hostName || request.host, {
+        roleName: options.roleName || '',
+        memoryScope: options.memoryScope || '',
+      });
+
+      const result = await this.codexSdk.runTask({
+        prompt: preparedPrompt,
+        commandPrefix,
+        workingDirectory: workdir,
+        sessionId: Object.prototype.hasOwnProperty.call(options, 'sessionId') ? options.sessionId : this.store.getChatSession(chatId),
+        abortSignal: abortController.signal,
+        files: request.files || [],
+        onProgress: async (payload) => {
+          const elapsedSeconds = (Date.now() - started) / 1000;
+          const previewBody = String(payload?.text || payload?.preview?.summary || payload?.preview?.content || '').trim() || 'thinking...';
+          if (payload?.marker !== 'thinking' || previewBody.toLowerCase() !== 'thinking...') {
+            leadingThinkingActive = false;
+          }
+          if (looksLikeContextPreview(previewBody, request.text)) return;
+          await sink.progress({
+            status: 'Running',
+            marker: payload?.marker || 'thinking',
+            text: previewBody,
+            preview: payload?.preview,
+            elapsedSeconds,
+          });
+        },
+      });
+
+      const sessionId = result.sessionId || '';
+      if (sessionId) {
+        if (typeof options.onSessionId === 'function') {
+          options.onSessionId(sessionId);
+        } else {
+          this.store.setChatSession(chatId, sessionId);
+        }
+      }
+
+      const opsResult = await applyAssistantOps({
+        output: result.output,
+        chatId,
+        request,
+        controller: this,
+        store: this.store,
+        scheduler: this.scheduler,
+        config: this.config,
+      });
+      const finalOutput = [opsResult.output, ...opsResult.errors].filter(Boolean).join('\n\n').trim();
+      const previewInfo = extractStructuredPreview(finalOutput || opsResult.summaries.join('\n'), 'Done');
+      const preview = previewInfo.content || finalOutput || opsResult.summaries.join('\n') || '(empty output)';
+      if (opsResult.counts.role || opsResult.counts.memory || opsResult.counts.schedule) {
+        console.info(`[runtime] applied ops host=${taskHost} chat=${chatId} role=${opsResult.counts.role} memory=${opsResult.counts.memory} schedule=${opsResult.counts.schedule}`);
+      }
+      console.info(`[runtime] task final(sdk) host=${taskHost} chat=${chatId} session=${sessionId || '-'} preview=${truncateText(preview, 160)}`);
+      await sink.final({
+        status: 'Done',
+        marker: previewInfo.marker,
+        text: preview,
+        preview: previewInfo,
+        elapsedSeconds: (Date.now() - started) / 1000,
+      });
+      return { success: true, summary: truncateText(preview, 240), cleanedOutput: preview, sessionId };
+    } catch (error) {
+      const message = error?.message || String(error);
+      if (abortController.signal.aborted) {
+        await sink.final('任务已取消。');
+        throw error;
+      }
+      await sink.final(clip(`Task failed\nReason: ${message}`));
+      return { success: false, summary: message, errorText: message };
+    } finally {
+      leadingThinkingActive = false;
+      clearInterval(thinkingTicker);
+      this.tasks.delete(taskKey);
+    }
   }
 
   async runPrompt(request, sink) {
