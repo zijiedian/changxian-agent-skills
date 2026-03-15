@@ -1,6 +1,6 @@
 ---
 name: changxian-remote-control
-description: Operate changxian-agent through Telegram, WeCom, chat bots, webhooks, or other remote-host bridges, including bridge runtime management plus bridge-backed durable memory, reusable roles, and scheduled jobs. Use when the user asks to enable remote control, start or restart the bridge runtime, inspect remote health or adapter status, change remote workdir/runtime settings, run tasks through a remote host instead of the local terminal, or when a turn includes `[MEMORY STATE]`, `[ROLE STATE]`, `[SCHEDULE STATE]`, or asks to remember, forget, pin, unpin, create roles, switch roles, or create, update, pause, resume, run, or delete scheduled jobs through the bridge.
+description: Operate changxian-agent through Telegram, WeCom, chat bots, webhooks, or other remote-host bridges, including bridge runtime management plus bridge-backed durable memory, reusable roles, scheduled jobs, and publishing content to preconfigured Telegram channels. Use when the user asks to enable remote control, start or restart the bridge runtime, inspect remote health or adapter status, change remote workdir/runtime settings, run tasks through a remote host instead of the local terminal, publish or preview content for a Telegram channel, or when a turn includes `[MEMORY STATE]`, `[ROLE STATE]`, `[SCHEDULE STATE]`, or asks to remember, forget, pin, unpin, create roles, switch roles, or create, update, pause, resume, run, or delete scheduled jobs through the bridge.
 ---
 
 # Changxian Remote Control
@@ -20,6 +20,7 @@ Use this skill for both remote-host bridge behavior and the persistent bridge st
 - Surface assumptions that matter for remote execution.
 - Prefer incremental updates over long monologues.
 - Keep the final handoff action-oriented.
+- When Telegram channel publishing is involved, distinguish clearly between preview and live publish.
 
 ## Quick Start
 
@@ -27,6 +28,7 @@ Use this skill for both remote-host bridge behavior and the persistent bridge st
 - Check the current bridge process and `/healthz` before and after a start or restart.
 - Prefer the bundled JavaScript runtime in `assets/reference-im-bridge/` unless the host explicitly uses another deployment.
 - Treat runtime config, state dir, PID, and health endpoint as the minimum facts to report back after startup work.
+- When the request is about publishing to Telegram channels, verify that channel aliases are configured before attempting to publish.
 
 ## Persistent State
 
@@ -72,6 +74,7 @@ Supported ops: `create_job`, `set_job`, `pause_job`, `resume_job`, `run_job`, `d
 - If the host supports media input, explain briefly how the file or image affects the task.
 - If the host supports scheduled execution, make scheduled prompts self-contained and deterministic.
 - If a capability is absent, adapt the workflow instead of pretending it exists.
+- For Telegram channel publishing, only use preconfigured aliases and never invent or guess raw channel ids.
 
 ## References
 
@@ -79,6 +82,7 @@ Resolve relative paths against this skill directory, not the current runtime wor
 
 - `references/host-bridge-contract.md` for the generic host capability model.
 - `references/telegram-adapter-example.md` for one Telegram-style adapter profile.
+- `references/telegram-operations.md` for day-to-day Telegram operations including channel publishing.
 - `references/wecom-adapter-example.md` for one WeCom intelligent robot profile.
 - `references/standalone-install.md` for the JavaScript standalone runtime layout and startup flow.
 
@@ -99,6 +103,8 @@ Resolve relative paths against this skill directory, not the current runtime wor
 - “重启远控桥接，顺手检查 healthz。”
 - “查看远控状态，看看机器人是不是还在线。”
 - “把这个项目接到企微里远程处理。”
+- “把这段内容发到 Telegram 频道 daily。”
+- “先预览频道消息，再发到 TG 频道。”
 - “记住以后默认中文回答，并固定在这个桥接会话里。”
 - “创建一个 reviewer 角色，以后默认用它。”
 - “每天早上 9 点自动检查远控服务状态并总结给我。”

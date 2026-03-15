@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { COMMAND_SPECS } from './commands.mjs';
 import { renderTelegramPayload } from './render.telegram.mjs';
+import { createTelegramChannelPublisher } from './telegram-channel-publisher.mjs';
 
 const TELEGRAM_EDIT_RETRY_DELAY_MS = 800;
 const TELEGRAM_PROGRESS_EDIT_INTERVAL_MS = 1000;
@@ -236,6 +237,11 @@ export async function startTelegramAdapter(config, controller) {
   }).catch((error) => {
     recordError(error, '[telegram] polling stopped');
   });
+
+  controller.attachTelegramChannelPublisher(createTelegramChannelPublisher({
+    bot,
+    config,
+  }));
 
   return {
     name: 'telegram',

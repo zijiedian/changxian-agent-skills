@@ -16,6 +16,7 @@ A Telegram bridge may expose controls such as:
 - workdir commands
 - runtime setting commands
 - scheduled-job commands
+- preconfigured channel publishing commands
 
 ## Example Command Surface
 
@@ -27,6 +28,9 @@ One Telegram adapter may choose commands like:
 - `/cwd <path>`
 - `/cmd ...`
 - `/setting ...`
+- `/channel list`
+- `/channel preview <alias> | <content>`
+- `/channel send <alias> | <content>`
 - skill-driven `rc-schedule-ops` blocks via `changxian-remote-control`
 
 These names are only examples. Another bridge may expose different command names or button-based controls.
@@ -38,3 +42,4 @@ When a Telegram adapter is active:
 - keep progress updates compact
 - avoid oversized responses when frequent edits are expected
 - make scheduled prompts explicit because the user may trigger them long after the original chat turn
+- for channel publishing, prefer configured aliases rather than raw channel identifiers

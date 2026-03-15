@@ -16,6 +16,27 @@
 - `/setting memory on|off` toggles memory injection.
 - `/setting scheduler on|off` toggles the scheduler.
 
+## Channel Publishing
+
+- `/channel list` shows configured Telegram channel aliases
+- `/channel preview <alias> | <content>` renders and previews content in the current control chat
+- `/channel send <alias> | <content>` publishes content to a configured Telegram channel
+- `/channel test <alias>` sends a short publish test message to the configured channel
+
+Recommended config:
+
+```env
+TG_CHANNEL_TARGETS={"daily":"@my_daily_channel","news":"-1001234567890"}
+TG_DEFAULT_CHANNEL=daily
+TG_CHANNEL_ALLOWED_OPERATOR_IDS=123456789
+```
+
+Rules:
+
+- publish only to configured aliases
+- preview in the current chat before sending when content matters
+- keep the allowlist enabled for operator safety when multiple humans share the bridge
+
 ## Scheduled Jobs
 
 Use `/schedule` commands or emit `rc-schedule-ops` blocks through `changxian-remote-control` to manage scheduled jobs.
