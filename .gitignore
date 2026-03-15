@@ -8,3 +8,4 @@ __pycache__/
 
 changxian-remote-control/assets/reference-im-bridge/.env
 changxian-remote-control/assets/reference-im-bridge/node_modules/
+.worktrees/
