@@ -19,10 +19,32 @@ npm run start
 Set credentials in `.env` before starting:
 
 - `TG_BOT_TOKEN` to enable Telegram
+- `TG_CHANNEL_TARGETS` to enable alias-based Telegram channel publishing
+- `TG_DEFAULT_CHANNEL` to set the default publishing alias
+- `TG_CHANNEL_ALLOWED_OPERATOR_IDS` to restrict who can publish
 - `WECOM_BOT_ID` and `WECOM_BOT_SECRET` to enable WeCom
 - `RC_AUTH_PASSPHRASE` to require authentication in chat before tasks can run
 
 Only adapters with valid credentials are started.
+
+## Telegram Channel Publishing
+
+The Telegram runtime can publish to preconfigured Telegram channels by alias.
+
+Example:
+
+```bash
+TG_CHANNEL_TARGETS='{"daily":"@my_daily_channel","news":"-1001234567890"}'
+TG_DEFAULT_CHANNEL=daily
+TG_CHANNEL_ALLOWED_OPERATOR_IDS=123456789
+```
+
+Then use channel commands through the bridge:
+
+- `/channel list`
+- `/channel preview daily | 今日 AI 热点摘要`
+- `/channel send daily | 今日 AI 热点摘要`
+- `/channel test daily`
 
 ## Runtime State
 

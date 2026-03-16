@@ -258,7 +258,7 @@ function previewFromCommandExecution(item, stage = 'completed') {
   const output = clipText(item?.aggregated_output || '', stage === 'completed' ? 2000 : 1200);
   const exitCode = item?.exit_code;
   const checks = [];
-  let summary = stage === 'completed' ? '命令执行完成' : '执行命令';
+  let summary = '';
   if (Number.isInteger(exitCode)) {
     checks.push(exitCode === 0 ? '命令执行完成' : `命令退出码: ${exitCode}`);
     if (exitCode !== 0) summary = '命令执行失败';

@@ -13,7 +13,8 @@ export const COMMAND_SPECS = [
   { name: 'backend', menuDescription: 'Show or reset the Codex backend', help: '/backend codex reset to the default Codex SDK backend' },
   { name: 'memory', menuDescription: 'Show or manage saved memory', help: '/memory inspect or manage saved memory' },
   { name: 'role', menuDescription: 'Show or manage chat roles', help: '/role inspect or manage chat roles' },
-  { name: 'schedule', menuDescription: 'Show or manage scheduled jobs', help: '/schedule inspect or manage scheduled jobs' }
+  { name: 'schedule', menuDescription: 'Show or manage scheduled jobs', help: '/schedule inspect or manage scheduled jobs' },
+  { name: 'channel', menuDescription: 'Preview or publish to Telegram channels', help: '/channel inspect or publish to preconfigured Telegram channels' }
 ];
 
 export const COMMAND_INDEX = new Map();

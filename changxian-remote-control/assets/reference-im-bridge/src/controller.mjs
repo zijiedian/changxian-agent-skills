@@ -6,6 +6,7 @@ import { applyAssistantOps } from './assistant_ops.mjs';
 import { CodexSdkProvider } from './codex-sdk-provider.mjs';
 import { extractStructuredPreview } from './codex.mjs';
 import { buildExecutionEnv, runCommandPreflight } from './preflight.mjs';
+import { parseChannelCommandInput } from './telegram-channel-publisher.mjs';
 import { redactedCommandText, truncateText } from './utils.mjs';
 
 const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[CURRENT TASK]'];
@@ -64,10 +65,15 @@ export class RuntimeController {
     this.scheduler = null;
     this.preflightCache = new Map();
     this.codexSdk = new CodexSdkProvider(config, buildExecutionEnv);
+    this.telegramChannelPublisher = null;
   }
 
   attachScheduler(scheduler) {
     this.scheduler = scheduler || null;
+  }
+
+  attachTelegramChannelPublisher(publisher) {
+    this.telegramChannelPublisher = publisher || null;
   }
 
   makeTaskKey(host, chatId) {
@@ -286,6 +292,8 @@ export class RuntimeController {
         `role: ${this.activeRoleName(chatId) || '(none)'}`,
         `memory: ${this.config.enableMemory ? 'enabled' : 'disabled'}`,
         `scheduler: ${this.config.enableScheduler ? 'enabled' : 'disabled'}`,
+        `telegram_channels: ${Object.keys(this.config.tgChannelTargets || {}).length}`,
+        `telegram_default_channel: ${this.config.tgDefaultChannel || '(none)'}`,
         `command: ${this.displayCommandPrefix(chatId)}`,
         `running: ${this.hasRunningTaskForChat(chatId) ? 'yes' : 'no'}`,
       ].join('\n'));
@@ -365,6 +373,10 @@ export class RuntimeController {
       await sink.final(await this.handleScheduleCommand(chatId, rest));
       return true;
     }
+    if (spec.name === 'channel') {
+      await sink.final(await this.handleChannelCommand(request, rest));
+      return true;
+    }
     if (spec.name === 'skill') {
       await sink.final(this.handleSkillCommand());
       return true;
@@ -421,6 +433,9 @@ export class RuntimeController {
       `memory: ${this.config.enableMemory ? 'enabled' : 'disabled'}`,
       `scheduler: ${this.config.enableScheduler ? 'enabled' : 'disabled'}`,
       `session_resume: ${this.config.enableSessionResume ? 'enabled' : 'disabled'}`,
+      `telegram_channels: ${Object.keys(this.config.tgChannelTargets || {}).length}`,
+      `telegram_default_channel: ${this.config.tgDefaultChannel || '(none)'}`,
+      `telegram_channel_allowlist: ${this.config.tgChannelAllowedOperatorIds?.size ? `${this.config.tgChannelAllowedOperatorIds.size} ids` : 'disabled'}`,
       `default_workdir: ${this.config.defaultWorkdir}`,
       `command_prefix: ${redactedCommandText(this.config.codexCommandPrefix)}`,
       `codex_sdk: ${codexSdk.initialized ? 'initialized' : 'lazy'}`,
@@ -569,6 +584,106 @@ export class RuntimeController {
       return this.store.deleteJob(chatId, rest) ? `Deleted ${rest}` : 'Scheduled job not found';
     }
     return 'Unknown schedule command\nUse /schedule for usage.';
+  }
+
+  async handleChannelCommand(request, raw) {
+    const text = String(raw || '').trim();
+    const publisher = this.telegramChannelPublisher;
+    const operatorId = request.externalUserId || request.externalChatId || request.chatId;
+
+    if (!publisher) {
+      return 'Telegram channel publishing unavailable\nConfigure TG_BOT_TOKEN and TG_CHANNEL_TARGETS first.';
+    }
+
+    if (!text) {
+      const targets = publisher.listTargets();
+      return [
+        'Telegram Channel Publishing',
+        `configured: ${targets.length}`,
+        `default: ${this.config.tgDefaultChannel || '(none)'}`,
+        '',
+        'Usage',
+        '/channel list',
+        '/channel preview <alias> | <content>',
+        '/channel send <alias> | <content>',
+        '/channel test <alias>',
+      ].join('\n');
+    }
+
+    const [sub, rest] = parseParts(text);
+    if (['list', 'ls'].includes(sub)) {
+      const targets = publisher.listTargets();
+      if (!targets.length) return 'No configured Telegram channel aliases';
+      return [
+        'Telegram Channel Targets',
+        ...targets.map(({ alias, target }) => `- ${alias}: ${target}${alias === this.config.tgDefaultChannel ? ' [default]' : ''}`),
+      ].join('\n');
+    }
+    if (sub === 'preview') {
+      let parsed;
+      try {
+        parsed = parseChannelCommandInput(rest);
+      } catch (error) {
+        return `Usage\n/channel preview <alias> | <content>\nReason: ${error.message || error}`;
+      }
+      try {
+        const preview = await publisher.preview({
+          alias: parsed.alias,
+          payload: parsed.content,
+          operatorId,
+        });
+        return [
+          '<b>Channel Preview</b>',
+          `<b>Alias:</b> ${preview.alias}`,
+          `<b>Target:</b> ${preview.target}`,
+          `<b>Pages:</b> ${preview.pages.length}`,
+          `<b>Images:</b> ${(preview.images || []).length}`,
+          '',
+          preview.html,
+        ].join('\n');
+      } catch (error) {
+        return `Channel preview failed\nReason: ${error.message || error}`;
+      }
+    }
+    if (sub === 'send') {
+      let parsed;
+      try {
+        parsed = parseChannelCommandInput(rest);
+      } catch (error) {
+        return `Usage\n/channel send <alias> | <content>\nReason: ${error.message || error}`;
+      }
+      try {
+        const result = await publisher.send({
+          alias: parsed.alias,
+          payload: parsed.content,
+          operatorId,
+        });
+        return [
+          'Channel publish sent',
+          `Alias: ${result.alias}`,
+          `Target: ${result.target}`,
+          `Deliveries: ${result.published.length}`,
+        ].join('\n');
+      } catch (error) {
+        return `Channel publish failed\nReason: ${error.message || error}`;
+      }
+    }
+    if (sub === 'test') {
+      if (!rest) return 'Usage\n/channel test <alias>';
+      try {
+        const result = await publisher.test({ alias: rest, operatorId });
+        return [
+          'Channel test sent',
+          `Alias: ${result.alias}`,
+          `Target: ${result.target}`,
+          `Message: ${result.messageId}`,
+        ].join('\n');
+      } catch (error) {
+        return `Channel test failed\nReason: ${error.message || error}`;
+      }
+    }
+
+    return 'Unknown channel command\nUse /channel for usage.';
   }
 
   async runTask(request, sink, options = {}) {

@@ -951,7 +951,6 @@ function summarizeActivityGroups(groups, status) {
   const details = [];
   const detailSeen = new Set();
   let phase = '';
-  let commandSummary = '';
   const sourceDomains = [];
   const sourceSeen = new Set();
   let searchLineCount = 0;
@@ -972,9 +971,7 @@ function summarizeActivityGroups(groups, status) {
 
     if (group.kind === 'command') {
       if (!phase) phase = 'exec';
-      const summary = summarizeShellCommand(group.lines[0] || '');
-      if (!commandSummary) commandSummary = summary;
-      pushUnique(details, detailSeen, summary);
+      continue;
     }
   }
 
@@ -993,7 +990,6 @@ function summarizeActivityGroups(groups, status) {
     summaryLines,
     details,
     sourceDomains,
-    commandSummary,
   };
 }
 
@@ -1241,14 +1237,8 @@ export function buildStructuredPreview(content, { status = 'Done', marker = 'ass
       summary = status === 'Running'
         ? `正在整理 ${changedFiles.length} 个文件的变更。`
         : `已整理 ${changedFiles.length} 个文件的变更。`;
-    } else if (activitySummary.commandSummary) {
-      summary = status === 'Running'
-        ? `${runningCommandSummary(activitySummary.commandSummary)}。`
-        : `${activitySummary.commandSummary}完成。`;
     } else if (commandPreviewLines.length) {
-      summary = status === 'Running'
-        ? `${runningCommandSummary(summarizeShellCommand(commandPreviewLines[0]))}。`
-        : `${summarizeShellCommand(commandPreviewLines[0])}完成。`;
+      summary = '';
     } else if (normalized) {
       summary = truncateText(normalizeParagraphText(normalized), 180);
     }
@@ -1287,7 +1277,7 @@ export function buildStructuredPreview(content, { status = 'Done', marker = 'ass
     changedFiles,
     diffBlocks,
     codeBlocks,
-    commandPreview: activitySummary.commandSummary || commandPreviewLines[0] || '',
+    commandPreview: commandPreviewLines[0] || '',
     commandPreviewLines,
     activities: activityGroups,
     sourceDomains: activitySummary.sourceDomains,
@@ -1374,14 +1364,10 @@ export function buildExecProgressMarkdown(preview, options = {}) {
       ? String(value.commandPreviewLines[value.commandPreviewLines.length - 1] || '').trim()
       : '');
   const displayCommand = latestExec?.displayCommand || stripShellWrapper(fallbackCommand) || fallbackCommand;
-  const summary = displayCommand
-    ? summarizeShellCommand(displayCommand)
-    : (latestExec ? summarizeShellCommand(latestExec.command) : String(value.summary || '').trim());
   const remainder = stripLeadingProgressCommand(value.content || '', fallbackCommand);
 
   const lines = [];
   if (heading) lines.push(`**${heading}**`);
-  if (summary && !(displayCommand && isGenericCommandSummary(summary))) lines.push(summary);
   if (displayCommand) {
     if (lines.length) lines.push('');
     lines.push('```bash');
@@ -1394,7 +1380,8 @@ export function buildExecProgressMarkdown(preview, options = {}) {
   }
   if (remainder) {
     const normalizedRemainder = normalizePreviewContent(remainder);
-    if (normalizedRemainder) {
+    const simplifiedRemainder = stripOuterCodeFence(normalizedRemainder);
+    if (normalizedRemainder && simplifiedRemainder !== displayCommand) {
       if (lines.length) lines.push('');
       lines.push(normalizedRemainder);
     }

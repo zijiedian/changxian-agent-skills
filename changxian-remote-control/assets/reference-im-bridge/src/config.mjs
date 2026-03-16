@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import dotenv from 'dotenv';
+import { normalizeTelegramChannelAllowlist, parseTelegramChannelTargets } from './telegram-channel-publisher.mjs';
 
 function firstEnv(...names) {
   for (const name of names) {
@@ -43,6 +44,9 @@ export function loadConfig() {
   dotenv.config({ path: path.join(stateDir, '.env') });
   const authPassphrase = firstEnv('RC_AUTH_PASSPHRASE', 'TG_AUTH_PASSPHRASE', 'WECOM_AUTH_PASSPHRASE');
   const authTtlRaw = firstEnv('RC_AUTH_TTL_SECONDS', 'TG_AUTH_TTL_SECONDS', 'WECOM_AUTH_TTL_SECONDS');
+  const tgChannelTargets = parseTelegramChannelTargets(firstEnv('TG_CHANNEL_TARGETS'));
+  const tgDefaultChannel = String(process.env.TG_DEFAULT_CHANNEL || '').trim();
+  const tgChannelAllowedOperatorIds = normalizeTelegramChannelAllowlist(firstEnv('TG_CHANNEL_ALLOWED_OPERATOR_IDS'));
   return {
     stateDir,
     host: String(process.env.RC_HOST || '0.0.0.0').trim(),
@@ -51,6 +55,9 @@ export function loadConfig() {
     logMaxBytes: Number.parseInt(process.env.RC_LOG_MAX_BYTES || String(10 * 1024 * 1024), 10),
     logMaxFiles: Number.parseInt(process.env.RC_LOG_MAX_FILES || '3', 10),
     tgBotToken: String(process.env.TG_BOT_TOKEN || '').trim(),
+    tgChannelTargets,
+    tgDefaultChannel,
+    tgChannelAllowedOperatorIds,
     wecomBotId: String(process.env.WECOM_BOT_ID || '').trim(),
     wecomBotSecret: String(process.env.WECOM_BOT_SECRET || '').trim(),
     wecomWsUrl: String(process.env.WECOM_WEBSOCKET_URL || 'wss://openws.work.weixin.qq.com').trim(),
