@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
+import { detectBackend, BACKEND_CODEX } from './backend-detection.mjs';
 import { redactedCommandText, splitShellArgs } from './utils.mjs';
 
-const REMOTE_CONTROL_ENV_RE = /^(?:TG_|WECOM_|RC_AUTH_|RC_CODEX_|RC_HOST$|RC_PORT$|RC_ENABLE_|RC_MEMORY_|RC_SCHEDULER_|RC_REPLY_|RC_MAX_|RC_DEFAULT_TIMEZONE$)/;
+const REMOTE_CONTROL_ENV_RE = /^(?:TG_|WECOM_|RC_AUTH_|RC_CODEX_|RC_OPENCODE_|RC_DEFAULT_BACKEND$|RC_HOST$|RC_PORT$|RC_ENABLE_|RC_MEMORY_|RC_SCHEDULER_|RC_REPLY_|RC_MAX_|RC_DEFAULT_TIMEZONE$|OPENCODE_ACP_)/;
 const VERSION_PROBE_ARGS = [['--version'], ['version'], ['-v']];
 const CODEX_AUTH_PROBE_ARGS = [['login', 'status'], ['auth', 'status']];
 
@@ -48,12 +49,6 @@ function runProbe(executable, args, env) {
   };
 }
 
-function detectBackend(binary) {
-  const base = path.basename(String(binary || ''));
-  if (base === 'codex') return 'codex';
-  return 'unsupported';
-}
-
 export function buildExecutionEnv(baseEnv = process.env, overrides = {}) {
   const env = { ...baseEnv };
   for (const key of Object.keys(env)) {
@@ -74,7 +69,7 @@ export function runCommandPreflight(options = {}) {
   const env = options.env || buildExecutionEnv();
   const args = splitShellArgs(commandPrefix);
   const executable = args[0] || '';
-  const backend = detectBackend(executable);
+  const backend = detectBackend(commandPrefix);
   const checks = [];
 
   const pushCheck = (name, ok, detail, severity = ok ? 'info' : 'error') => {
@@ -84,7 +79,11 @@ export function runCommandPreflight(options = {}) {
   pushCheck('shell', fs.existsSync(shell), fs.existsSync(shell) ? shell : `${shell} not found`);
   pushCheck('command-prefix', Boolean(commandPrefix), commandPrefix ? redactedCommandText(commandPrefix) : 'empty command prefix');
   pushCheck('workdir', fs.existsSync(workdir) && fs.statSync(workdir).isDirectory(), workdir);
-  pushCheck('backend', backend === 'codex', backend === 'codex' ? 'codex sdk' : 'this runtime only supports codex command prefixes');
+  pushCheck(
+    'backend',
+    backend === BACKEND_CODEX || backend === 'opencode-acp',
+    backend === BACKEND_CODEX ? 'codex sdk' : backend === 'opencode-acp' ? 'opencode acp' : 'unsupported command prefix',
+  );
 
   if (args.some((arg) => /<[^>]+>/.test(arg))) {
     pushCheck('command-template', false, 'command prefix still contains angle-bracket placeholders');
@@ -107,7 +106,7 @@ export function runCommandPreflight(options = {}) {
   }
 
   let auth = '';
-  if (includeAuthProbe && resolvedPath && backend === 'codex') {
+  if (includeAuthProbe && resolvedPath && backend === BACKEND_CODEX) {
     let authOk = false;
     for (const probeArgs of CODEX_AUTH_PROBE_ARGS) {
       const probe = runProbe(resolvedPath, probeArgs, env);

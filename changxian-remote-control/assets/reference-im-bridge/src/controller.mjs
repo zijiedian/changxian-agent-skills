@@ -3,8 +3,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { resolveCommand, helpLines } from './commands.mjs';
 import { applyAssistantOps } from './assistant_ops.mjs';
+import {
+  BACKEND_CODEX,
+  BACKEND_OPENCODE_ACP,
+  backendLabel,
+  defaultCommandPrefixForBackend,
+  detectBackend,
+  normalizeBackendAlias,
+} from './backend-detection.mjs';
 import { CodexSdkProvider } from './codex-sdk-provider.mjs';
 import { extractStructuredPreview } from './codex.mjs';
+import { OpencodeAcpProvider } from './opencode-acp-provider.mjs';
 import { buildExecutionEnv, runCommandPreflight } from './preflight.mjs';
 import { parseChannelCommandInput } from './telegram-channel-publisher.mjs';
 import { redactedCommandText, truncateText } from './utils.mjs';
@@ -65,6 +74,7 @@ export class RuntimeController {
     this.scheduler = null;
     this.preflightCache = new Map();
     this.codexSdk = new CodexSdkProvider(config, buildExecutionEnv);
+    this.opencodeAcp = new OpencodeAcpProvider(config, buildExecutionEnv);
     this.telegramChannelPublisher = null;
   }
 
@@ -125,11 +135,21 @@ export class RuntimeController {
   }
 
   effectiveCommandPrefix(chatId) {
-    return this.store.getChatCommandPrefix(chatId) || this.config.codexCommandPrefix;
+    return this.store.getChatCommandPrefix(chatId) || defaultCommandPrefixForBackend(this.config, this.config.defaultBackend);
   }
 
   displayCommandPrefix(chatId) {
     return redactedCommandText(this.effectiveCommandPrefix(chatId));
+  }
+
+  effectiveBackend(chatId) {
+    return detectBackend(this.effectiveCommandPrefix(chatId));
+  }
+
+  backendProvider(backend) {
+    if (backend === BACKEND_CODEX) return this.codexSdk;
+    if (backend === BACKEND_OPENCODE_ACP) return this.opencodeAcp;
+    return null;
   }
 
   normalizeWorkdir(workdir) {
@@ -349,16 +369,28 @@ export class RuntimeController {
     }
     if (spec.name === 'backend') {
       if (!rest) {
-        await sink.final('codex');
+        const backend = this.effectiveBackend(chatId);
+        await sink.final(`backend: ${backend}\nlabel: ${backendLabel(backend)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
         return true;
       }
-      const value = rest.toLowerCase();
-      if (value === 'codex') {
+      const value = normalizeBackendAlias(rest);
+      if (value === 'default') {
         this.store.clearChatCommandPrefix(chatId);
-        await sink.final('已切回 Codex SDK 默认后端。');
+        const backend = this.effectiveBackend(chatId);
+        await sink.final(`已恢复默认后端: ${backendLabel(backend)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
         return true;
       }
-      await sink.final('当前 runtime 仅支持 Codex SDK。\nUsage\n/backend codex');
+      if (value === BACKEND_CODEX) {
+        this.store.setChatCommandPrefix(chatId, this.config.codexCommandPrefix);
+        await sink.final(`已切到 ${backendLabel(BACKEND_CODEX)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
+        return true;
+      }
+      if (value === BACKEND_OPENCODE_ACP) {
+        this.store.setChatCommandPrefix(chatId, this.config.opencodeCommandPrefix);
+        await sink.final(`已切到 ${backendLabel(BACKEND_OPENCODE_ACP)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
+        return true;
+      }
+      await sink.final('Unsupported backend\nUsage\n/backend codex\n/backend opencode-acp\n/backend default');
       return true;
     }
     if (spec.name === 'memory') {
@@ -428,7 +460,9 @@ export class RuntimeController {
 
   handleSettingCommand() {
     const codexSdk = this.codexSdk.getDiagnostics();
+    const opencodeAcp = this.opencodeAcp.getDiagnostics();
     return [
+      `default_backend: ${this.config.defaultBackend}`,
       `auth: ${this.isSecondFactorEnabled() ? `enabled (${formatSeconds(this.config.authTtlSeconds)})` : 'disabled'}`,
       `memory: ${this.config.enableMemory ? 'enabled' : 'disabled'}`,
       `scheduler: ${this.config.enableScheduler ? 'enabled' : 'disabled'}`,
@@ -437,7 +471,9 @@ export class RuntimeController {
       `telegram_default_channel: ${this.config.tgDefaultChannel || '(none)'}`,
       `telegram_channel_allowlist: ${this.config.tgChannelAllowedOperatorIds?.size ? `${this.config.tgChannelAllowedOperatorIds.size} ids` : 'disabled'}`,
       `default_workdir: ${this.config.defaultWorkdir}`,
-      `command_prefix: ${redactedCommandText(this.config.codexCommandPrefix)}`,
+      `default_command_prefix: ${redactedCommandText(this.config.defaultCommandPrefix)}`,
+      `codex_command_prefix: ${redactedCommandText(this.config.codexCommandPrefix)}`,
+      `opencode_acp_command_prefix: ${redactedCommandText(this.config.opencodeCommandPrefix)}`,
       `codex_sdk: ${codexSdk.initialized ? 'initialized' : 'lazy'}`,
       `codex_model_passthrough: ${codexSdk.modelPassthrough ? 'enabled' : 'disabled'}`,
       `codex_auth: ${codexSdk.authSource}`,
@@ -445,6 +481,13 @@ export class RuntimeController {
       ...(codexSdk.lastInitError ? [`codex_last_init_error: ${codexSdk.lastInitError}`] : []),
       ...(codexSdk.lastResumeSkipReason ? [`codex_last_resume_skip: ${codexSdk.lastResumeSkipReason}`] : []),
       ...(codexSdk.lastTransientRetryReason ? [`codex_last_transient_retry: ${codexSdk.lastTransientRetryReason}`] : []),
+      `opencode_acp: ${opencodeAcp.initialized ? 'initialized' : 'lazy'}`,
+      `opencode_agent: ${[opencodeAcp.agentName, opencodeAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
+      `opencode_auth_methods: ${opencodeAcp.authMethods?.length ? opencodeAcp.authMethods.join(', ') : '(none reported)'}`,
+      ...(opencodeAcp.lastInitError ? [`opencode_last_init_error: ${opencodeAcp.lastInitError}`] : []),
+      ...(opencodeAcp.lastResumeSkipReason ? [`opencode_last_resume_skip: ${opencodeAcp.lastResumeSkipReason}`] : []),
+      ...(opencodeAcp.lastPermissionDecision ? [`opencode_last_permission: ${opencodeAcp.lastPermissionDecision}`] : []),
+      ...(opencodeAcp.lastStopReason ? [`opencode_last_stop_reason: ${opencodeAcp.lastStopReason}`] : []),
     ].join('\n');
   }
 
@@ -743,13 +786,22 @@ export class RuntimeController {
         memoryScope: options.memoryScope || '',
       });
 
-      const result = await this.codexSdk.runTask({
+      const backend = detectBackend(commandPrefix);
+      const provider = this.backendProvider(backend);
+      if (!provider) {
+        throw new Error(`Unsupported backend for command prefix: ${commandPrefix}`);
+      }
+
+      const result = await provider.runTask({
         prompt: preparedPrompt,
         commandPrefix,
         workingDirectory: workdir,
         sessionId: Object.prototype.hasOwnProperty.call(options, 'sessionId') ? options.sessionId : this.store.getChatSession(chatId),
         abortSignal: abortController.signal,
         files: request.files || [],
+        onPermissionRequest: typeof sink.requestPermission === 'function'
+          ? (permissionRequest, meta = {}) => sink.requestPermission(permissionRequest, meta)
+          : undefined,
         onProgress: async (payload) => {
           const elapsedSeconds = (Date.now() - started) / 1000;
           const previewBody = String(payload?.text || payload?.preview?.summary || payload?.preview?.content || '').trim() || 'thinking...';
@@ -791,7 +843,7 @@ export class RuntimeController {
       if (opsResult.counts.role || opsResult.counts.memory || opsResult.counts.schedule) {
         console.info(`[runtime] applied ops host=${taskHost} chat=${chatId} role=${opsResult.counts.role} memory=${opsResult.counts.memory} schedule=${opsResult.counts.schedule}`);
       }
-      console.info(`[runtime] task final(sdk) host=${taskHost} chat=${chatId} session=${sessionId || '-'} preview=${truncateText(preview, 160)}`);
+      console.info(`[runtime] task final backend=${backend} host=${taskHost} chat=${chatId} session=${sessionId || '-'} preview=${truncateText(preview, 160)}`);
       await sink.final({
         status: 'Done',
         marker: previewInfo.marker,

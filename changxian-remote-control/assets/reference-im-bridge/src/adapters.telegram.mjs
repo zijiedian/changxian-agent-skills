@@ -2,6 +2,11 @@ import crypto from 'node:crypto';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { COMMAND_SPECS } from './commands.mjs';
 import { renderTelegramPayload } from './render.telegram.mjs';
+import {
+  buildPermissionPromptText,
+  createTelegramPermissionRegistry,
+  permissionOptionLabel,
+} from './telegram-permission-prompt.mjs';
 import { createTelegramChannelPublisher } from './telegram-channel-publisher.mjs';
 
 const TELEGRAM_EDIT_RETRY_DELAY_MS = 800;
@@ -22,6 +27,38 @@ function isTransientEditError(reason) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function buildPermissionPromptHtml(request) {
+  return buildPermissionPromptText(request)
+    .split('\n')
+    .map((line) => escapeHtml(line))
+    .join('<br/>');
+}
+
+function buildPermissionDecisionHtml(request, decision) {
+  const base = buildPermissionPromptHtml(request);
+  const summary = decision?.outcome?.outcome === 'selected'
+    ? `已选择：${permissionOptionLabel(decision.option)}`
+    : '已取消权限请求';
+  return `${base}<br/><br/><b>${escapeHtml(summary)}</b>`;
+}
+
+function buildPermissionKeyboard(token, request) {
+  const keyboard = new InlineKeyboard();
+  const options = Array.isArray(request?.options) ? request.options : [];
+  options.forEach((option, index) => {
+    keyboard.text(permissionOptionLabel(option), `rcperm:${token}:${index}`).row();
+  });
+  keyboard.text('取消', `rcperm:${token}:cancel`);
+  return keyboard;
 }
 
 async function editTelegramMessage({
@@ -108,6 +145,7 @@ export async function startTelegramAdapter(config, controller) {
 
   const bot = new Bot(config.tgBotToken);
   const paginationSessions = new Map();
+  const permissionRegistry = createTelegramPermissionRegistry();
   const menuCommands = COMMAND_SPECS.map((spec) => ({ command: spec.name, description: spec.menuDescription }));
   let commandsSyncInFlight = false;
 
@@ -193,6 +231,30 @@ export async function startTelegramAdapter(config, controller) {
     }).catch(() => {});
   });
 
+  bot.callbackQuery(/^rcperm:([^:]+):([^:]+)$/, async (ctx) => {
+    permissionRegistry.prune();
+    const token = String(ctx.match?.[1] || '');
+    const action = String(ctx.match?.[2] || '');
+    const chatId = String(ctx.chat?.id || '');
+    const result = action === 'cancel'
+      ? permissionRegistry.cancel(token, chatId, 'manual-cancel')
+      : permissionRegistry.resolveWithOption(token, chatId, Number.parseInt(action, 10));
+
+    if (!result.ok) {
+      const text = result.reason === 'wrong-chat'
+        ? '当前消息不属于这个会话。'
+        : result.reason === 'invalid-option'
+          ? '按钮已失效，请重新触发权限请求。'
+          : '权限请求已失效，请重新执行任务。';
+      await ctx.answerCallbackQuery({ text, show_alert: false }).catch(() => {});
+      return;
+    }
+
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
+    const text = action === 'cancel' ? '已取消' : `已选择：${permissionOptionLabel(result.option)}`;
+    await ctx.answerCallbackQuery({ text, show_alert: false }).catch(() => {});
+  });
+
   function recordError(error, prefix = '[telegram] error') {
     status.connected = false;
     status.authenticated = false;
@@ -205,9 +267,10 @@ export async function startTelegramAdapter(config, controller) {
   });
 
   bot.on('message:text', async (ctx) => {
+    permissionRegistry.prune();
     status.lastMessageAt = Math.floor(Date.now() / 1000);
     const text = String(ctx.message.text || '').trim();
-    const sink = createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard);
+    const sink = createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, permissionRegistry);
     await controller.handleInput({
       host: 'telegram',
       chatId: String(ctx.chat.id),
@@ -260,7 +323,7 @@ export async function startTelegramAdapter(config, controller) {
   };
 }
 
-function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard) {
+function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, permissionRegistry) {
   let message = null;
   const sentImages = new Set();
   let editBackoffUntilMs = 0;
@@ -341,6 +404,27 @@ function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard) {
         { mode: 'final' },
       );
       await sendImages(rendered.images);
+    },
+    async requestPermission(request, { signal } = {}) {
+      const pending = permissionRegistry.create(String(ctx.chat.id), request);
+      const keyboard = buildPermissionKeyboard(pending.token, request);
+      const html = buildPermissionPromptHtml(request);
+      const abortHandler = () => {
+        permissionRegistry.cancel(pending.token, String(ctx.chat.id), 'aborted');
+      };
+
+      signal?.addEventListener('abort', abortHandler, { once: true });
+      try {
+        await upsertMessage(html, keyboard, { mode: 'final' });
+        const decision = await pending.promise;
+        await upsertMessage(buildPermissionDecisionHtml(request, decision), undefined, { mode: 'final' });
+        return { outcome: decision.outcome };
+      } catch (error) {
+        permissionRegistry.cancel(pending.token, String(ctx.chat.id), 'prompt-error');
+        throw error;
+      } finally {
+        signal?.removeEventListener('abort', abortHandler);
+      }
     },
   };
 }

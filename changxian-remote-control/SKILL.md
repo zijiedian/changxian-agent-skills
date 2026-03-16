@@ -1,6 +1,6 @@
 ---
 name: changxian-remote-control
-description: Operate changxian-agent through Telegram, WeCom, chat bots, webhooks, or other remote-host bridges, including bridge runtime management plus bridge-backed durable memory, reusable roles, scheduled jobs, and publishing content to preconfigured Telegram channels. Use when the user asks to enable remote control, start or restart the bridge runtime, inspect remote health or adapter status, change remote workdir/runtime settings, run tasks through a remote host instead of the local terminal, publish or preview content for a Telegram channel, or when a turn includes `[MEMORY STATE]`, `[ROLE STATE]`, `[SCHEDULE STATE]`, or asks to remember, forget, pin, unpin, create roles, switch roles, or create, update, pause, resume, run, or delete scheduled jobs through the bridge.
+description: Operate changxian-agent through Telegram, WeCom, chat bots, webhooks, or other remote-host bridges, including bridge runtime management plus bridge-backed durable memory, reusable roles, scheduled jobs, Telegram channel publishing, and backend switching between Codex SDK and OpenCode ACP. Use when the user asks to enable remote control, start or restart the bridge runtime, inspect remote health or adapter status, change remote workdir/runtime settings, switch the bridge backend to OpenCode ACP, run tasks through a remote host instead of the local terminal, publish or preview content for a Telegram channel, or when a turn includes `[MEMORY STATE]`, `[ROLE STATE]`, `[SCHEDULE STATE]`, or asks to remember, forget, pin, unpin, create roles, switch roles, or create, update, pause, resume, run, or delete scheduled jobs through the bridge.
 ---
 
 # Changxian Remote Control
@@ -29,6 +29,7 @@ Use this skill for both remote-host bridge behavior and the persistent bridge st
 - Prefer the bundled JavaScript runtime in `assets/reference-im-bridge/` unless the host explicitly uses another deployment.
 - Treat runtime config, state dir, PID, and health endpoint as the minimum facts to report back after startup work.
 - When the request is about publishing to Telegram channels, verify that channel aliases are configured before attempting to publish.
+- When the request is about OpenCode through Telegram or WeCom, confirm whether the bridge should use `codex` or `opencode-acp`, then load the OpenCode ACP reference before changing config or backend selection.
 
 ## Persistent State
 
@@ -83,6 +84,7 @@ Resolve relative paths against this skill directory, not the current runtime wor
 - `references/host-bridge-contract.md` for the generic host capability model.
 - `references/telegram-adapter-example.md` for one Telegram-style adapter profile.
 - `references/telegram-operations.md` for day-to-day Telegram operations including channel publishing.
+- `references/opencode-acp.md` for switching the bridge to OpenCode ACP and configuring the ACP command prefix.
 - `references/wecom-adapter-example.md` for one WeCom intelligent robot profile.
 - `references/standalone-install.md` for the JavaScript standalone runtime layout and startup flow.
 

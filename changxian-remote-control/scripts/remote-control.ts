@@ -4,12 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { execFileSync, spawn } from 'node:child_process';
+import { BACKEND_CODEX, defaultCommandPrefixForBackend, normalizeBackendAlias } from '../assets/reference-im-bridge/src/backend-detection.mjs';
 import { runCommandPreflight } from '../assets/reference-im-bridge/src/preflight.mjs';
 
 type ArgMap = Record<string, string | boolean>;
 type HealthSnapshot = Record<string, any> | null;
 
 const DEFAULT_CODEX_COMMAND_PREFIX = 'codex -a never --search exec -s danger-full-access --skip-git-repo-check';
+const DEFAULT_OPENCODE_COMMAND_PREFIX = 'opencode acp';
 
 function codexHome() {
   return process.env.CODEX_HOME?.trim()
@@ -188,8 +190,12 @@ function parseHealth(body: string): HealthSnapshot {
 
 function runtimeSettings(stateDir: string) {
   const env = readEnvFile(path.join(stateDir, '.env'));
+  const defaultBackend = normalizeBackendAlias(env.RC_DEFAULT_BACKEND || process.env.RC_DEFAULT_BACKEND, BACKEND_CODEX);
+  const codexCommandPrefix = String(env.CODEX_COMMAND_PREFIX || process.env.CODEX_COMMAND_PREFIX || DEFAULT_CODEX_COMMAND_PREFIX).trim();
+  const opencodeCommandPrefix = String(env.OPENCODE_ACP_COMMAND_PREFIX || process.env.OPENCODE_ACP_COMMAND_PREFIX || DEFAULT_OPENCODE_COMMAND_PREFIX).trim();
   return {
-    commandPrefix: String(env.CODEX_COMMAND_PREFIX || process.env.CODEX_COMMAND_PREFIX || DEFAULT_CODEX_COMMAND_PREFIX).trim(),
+    defaultBackend,
+    commandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, opencodeCommandPrefix }, defaultBackend),
     workdir: path.resolve(String(env.RC_DEFAULT_WORKDIR || process.env.RC_DEFAULT_WORKDIR || process.cwd()).trim() || process.cwd()),
     logFile: path.resolve(String(env.RC_LOG_FILE || process.env.RC_LOG_FILE || bridgeLogFile(stateDir)).trim()),
   };

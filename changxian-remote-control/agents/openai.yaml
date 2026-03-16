@@ -1,4 +1,4 @@
 interface:
   display_name: "Changxian Remote Control"
-  short_description: "Operate the bridge runtime, persistent state, and Telegram channel publishing"
-  default_prompt: "Use $changxian-remote-control for bridge runtime work, bridge-backed memory/role/schedule state changes, and publishing or previewing content for preconfigured Telegram channels."
+  short_description: "Operate remote bridge state and Codex/OpenCode backends"
+  default_prompt: "Use $changxian-remote-control to run the Telegram or WeCom bridge, switch between Codex and OpenCode ACP backends, or manage bridge-backed memory, roles, schedules, and Telegram channel publishing."

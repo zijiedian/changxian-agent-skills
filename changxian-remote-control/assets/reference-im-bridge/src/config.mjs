@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import dotenv from 'dotenv';
+import { BACKEND_CODEX, defaultCommandPrefixForBackend, normalizeBackendAlias } from './backend-detection.mjs';
 import { normalizeTelegramChannelAllowlist, parseTelegramChannelTargets } from './telegram-channel-publisher.mjs';
 
 function firstEnv(...names) {
@@ -47,6 +48,9 @@ export function loadConfig() {
   const tgChannelTargets = parseTelegramChannelTargets(firstEnv('TG_CHANNEL_TARGETS'));
   const tgDefaultChannel = String(process.env.TG_DEFAULT_CHANNEL || '').trim();
   const tgChannelAllowedOperatorIds = normalizeTelegramChannelAllowlist(firstEnv('TG_CHANNEL_ALLOWED_OPERATOR_IDS'));
+  const defaultBackend = normalizeBackendAlias(process.env.RC_DEFAULT_BACKEND, BACKEND_CODEX);
+  const codexCommandPrefix = String(process.env.CODEX_COMMAND_PREFIX || 'codex -a never --search exec -s danger-full-access --skip-git-repo-check').trim();
+  const opencodeCommandPrefix = String(process.env.OPENCODE_ACP_COMMAND_PREFIX || 'opencode acp').trim();
   return {
     stateDir,
     host: String(process.env.RC_HOST || '0.0.0.0').trim(),
@@ -61,8 +65,12 @@ export function loadConfig() {
     wecomBotId: String(process.env.WECOM_BOT_ID || '').trim(),
     wecomBotSecret: String(process.env.WECOM_BOT_SECRET || '').trim(),
     wecomWsUrl: String(process.env.WECOM_WEBSOCKET_URL || 'wss://openws.work.weixin.qq.com').trim(),
-    codexCommandPrefix: String(process.env.CODEX_COMMAND_PREFIX || 'codex -a never --search exec -s danger-full-access --skip-git-repo-check').trim(),
+    defaultBackend,
+    codexCommandPrefix,
+    opencodeCommandPrefix,
+    defaultCommandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, opencodeCommandPrefix }, defaultBackend),
     codexTimeoutSeconds: Number.parseInt(process.env.CODEX_TIMEOUT_SECONDS || '21600', 10),
+    opencodeTimeoutSeconds: Number.parseInt(process.env.OPENCODE_ACP_TIMEOUT_SECONDS || '21600', 10),
     defaultTimezone: String(process.env.RC_DEFAULT_TIMEZONE || 'Asia/Shanghai').trim(),
     defaultWorkdir: path.resolve(String(process.env.RC_DEFAULT_WORKDIR || process.cwd()).trim() || process.cwd()),
     maxBufferedOutputChars: Number.parseInt(process.env.RC_MAX_BUFFERED_OUTPUT_CHARS || '200000', 10),

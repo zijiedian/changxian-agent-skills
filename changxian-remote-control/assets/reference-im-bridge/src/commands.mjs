@@ -1,7 +1,7 @@
 export const COMMAND_SPECS = [
   { name: 'start', menuDescription: 'Show help and available commands', help: '/start show help and available commands', aliases: ['help'] },
   { name: 'run', menuDescription: 'Execute a prompt', help: '/run <prompt> execute a prompt' },
-  { name: 'new', menuDescription: 'Start a fresh Codex session', help: '/new start a fresh Codex session' },
+  { name: 'new', menuDescription: 'Start a fresh backend session', help: '/new start a fresh backend session' },
   { name: 'cwd', menuDescription: 'Show or change working directory', help: '/cwd show or change working directory' },
   { name: 'skill', menuDescription: 'List installed Codex skills', help: '/skill list installed Codex skills' },
   { name: 'status', menuDescription: 'Show current task status', help: '/status show current task status' },
@@ -10,7 +10,7 @@ export const COMMAND_SPECS = [
   { name: 'auth', menuDescription: 'Unlock execution', help: '/auth <passphrase> unlock execution' },
   { name: 'cmd', menuDescription: 'Show or update command prefix', help: '/cmd show or update command prefix' },
   { name: 'setting', menuDescription: 'Show or update bridge settings', help: '/setting show or update runtime settings' },
-  { name: 'backend', menuDescription: 'Show or reset the Codex backend', help: '/backend codex reset to the default Codex SDK backend' },
+  { name: 'backend', menuDescription: 'Show or switch backend runtime', help: '/backend [codex|opencode-acp|default] show or switch backend runtime' },
   { name: 'memory', menuDescription: 'Show or manage saved memory', help: '/memory inspect or manage saved memory' },
   { name: 'role', menuDescription: 'Show or manage chat roles', help: '/role inspect or manage chat roles' },
   { name: 'schedule', menuDescription: 'Show or manage scheduled jobs', help: '/schedule inspect or manage scheduled jobs' },
