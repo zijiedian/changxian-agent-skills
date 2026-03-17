@@ -1,6 +1,6 @@
 ---
 name: changxian-remote-control
-description: Operate changxian-agent through Telegram, WeCom, chat bots, webhooks, or other remote-host bridges, including bridge runtime management plus bridge-backed durable memory, reusable roles, scheduled jobs, Telegram channel publishing, and backend switching between Codex SDK and OpenCode ACP. Use when the user asks to enable remote control, start or restart the bridge runtime, inspect remote health or adapter status, change remote workdir/runtime settings, switch the bridge backend to OpenCode ACP, run tasks through a remote host instead of the local terminal, publish or preview content for a Telegram channel, or when a turn includes `[MEMORY STATE]`, `[ROLE STATE]`, `[SCHEDULE STATE]`, or asks to remember, forget, pin, unpin, create roles, switch roles, or create, update, pause, resume, run, or delete scheduled jobs through the bridge.
+description: Operate changxian-agent through Telegram, WeCom, chat bots, webhooks, or other remote-host bridges, including bridge runtime management plus bridge-backed durable memory, reusable roles, scheduled jobs, Telegram channel publishing, and backend switching between Codex SDK and OpenCode ACP. Use when the user asks to enable remote control, start or restart the bridge runtime, inspect remote health or adapter status, change remote workdir/runtime settings, switch the bridge backend to OpenCode ACP, run tasks through a remote host instead of the local terminal, publish or preview content for a Telegram channel, or when a turn includes `[MEMORY STATE]`, `[ROLE STATE]`, `[SCHEDULE STATE]`, or asks to remember, forget, pin, unpin, create roles, switch roles, or create, update, pause, resume, trigger, immediately execute, rerun, run now, or delete scheduled jobs through the bridge.
 ---
 
 # Changxian Remote Control
@@ -37,8 +37,19 @@ Use this skill for both remote-host bridge behavior and the persistent bridge st
 - Keep durable memory for stable preferences, facts, and constraints. Do not save secrets or one-off task details.
 - Keep saved roles reusable and stable across turns. Use lowercase hyphenated role names.
 - Keep schedules explicit and auditable. Prefer concrete `once`, `every`, or `cron` expressions.
+- If the user asks to run a scheduled job right now, prefer `run_job` against the existing job instead of rewriting its schedule.
+- If the user asks to "run now and keep the schedule", emit only `run_job` unless they also asked for another change.
+- If the user asks to "rerun" or "补跑", treat it as immediate execution of an existing job unless they explicitly want a new one-time schedule.
 - If the user only wants to inspect state, reply normally and do not emit an ops block.
 - Briefly explain real state changes in user-facing prose.
+
+## Scheduled Job Workflow
+
+- Match immediate-execution requests such as "run now", "trigger this job", "立即执行", "现在跑一次", or "补跑昨天的任务" to `run_job`.
+- Use `create_job` only when the user wants a new schedule, not when they want to fire an existing job immediately.
+- Keep direct execution separate from schedule edits: do not pause, resume, or rewrite the job unless the user asked for that too.
+- When `[SCHEDULE STATE]` is present, resolve the job by the saved id or the closest unambiguous name before emitting `run_job`.
+- If the user names a job ambiguously, explain the ambiguity briefly instead of guessing which job to trigger.
 
 ## Output Protocol
 
@@ -67,6 +78,12 @@ Schedule:
 ```
 
 Supported ops: `create_job`, `set_job`, `pause_job`, `resume_job`, `run_job`, `delete_job`
+
+Immediate run example:
+
+```rc-schedule-ops
+{"ops":[{"op":"run_job","job_id":"daily-health-check"}]}
+```
 
 ## Host Rules
 
@@ -110,6 +127,8 @@ Resolve relative paths against this skill directory, not the current runtime wor
 - “记住以后默认中文回答，并固定在这个桥接会话里。”
 - “创建一个 reviewer 角色，以后默认用它。”
 - “每天早上 9 点自动检查远控服务状态并总结给我。”
+- “现在直接执行 daily-health-check 这个定时任务。”
+- “把昨晚那条定时任务补跑一次，但别改原来的 cron。”
 - “以后默认在这个目录下远程处理这个项目。”
 - “我给你发一张截图，你帮我远程定位问题。”
 - “把接下来的执行过程用适合手机阅读的短进度更新返回给我。”

@@ -36,6 +36,7 @@ If `schedule_task` is available, the host may support:
 - one-time delayed jobs
 - interval jobs
 - cron-like recurring jobs
+- manual immediate runs of an existing saved job
 - pausing and resuming jobs
 - removing jobs
 

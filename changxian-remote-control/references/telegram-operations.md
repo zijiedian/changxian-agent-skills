@@ -60,6 +60,12 @@ Example operation block:
 {"ops":[{"op":"create_job","schedule_type":"cron","schedule_expr":"0 9 * * *","prompt":"check deployment health and summarize failures","timezone":"Asia/Shanghai"}]}
 ```
 
+Run an existing job immediately without changing its schedule:
+
+```rc-schedule-ops
+{"ops":[{"op":"run_job","job_id":"daily-health-check"}]}
+```
+
 ## Collaboration With Other Skills
 
 - Use `changxian-remote-control` for durable preferences and facts stored in the bridge.

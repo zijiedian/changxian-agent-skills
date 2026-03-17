@@ -90,9 +90,23 @@ export class RuntimeController {
     return `${String(host)}:${String(chatId)}`;
   }
 
+  isSchedulerTaskHost(host) {
+    return String(host || '').startsWith('scheduler:');
+  }
+
   hasRunningTaskForChat(chatId) {
     const target = String(chatId);
     return [...this.tasks.values()].some((entry) => entry?.chatId === target);
+  }
+
+  hasConflictingRunningTaskForChat(chatId, taskHost) {
+    const target = String(chatId);
+    const schedulerTask = this.isSchedulerTaskHost(taskHost);
+    return [...this.tasks.values()].some((entry) => {
+      if (!entry || entry.chatId !== target) return false;
+      if (!schedulerTask) return true;
+      return this.isSchedulerTaskHost(entry.host);
+    });
   }
 
   getTaskForChat(chatId) {
@@ -734,7 +748,7 @@ export class RuntimeController {
     const hostName = options.hostName || request.host;
     const taskHost = options.taskHost || request.host;
     const taskKey = this.makeTaskKey(taskHost, chatId);
-    if (this.hasRunningTaskForChat(chatId)) {
+    if (this.hasConflictingRunningTaskForChat(chatId, taskHost)) {
       await sink.final('当前会话已有任务在运行，请稍后重试。');
       return { success: false, skipped: true, summary: 'chat busy', errorText: 'chat already has a running task' };
     }
