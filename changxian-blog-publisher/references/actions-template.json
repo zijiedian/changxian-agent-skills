@@ -1,0 +1,14 @@
+[
+  {
+    "label": "查看原始来源",
+    "href": "https://example.com",
+    "variant": "primary",
+    "external": true
+  },
+  {
+    "label": "下载附件",
+    "href": "/assets/posts/my-article/appendix.pdf",
+    "variant": "secondary",
+    "download": true
+  }
+]

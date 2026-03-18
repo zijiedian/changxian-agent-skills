@@ -1,0 +1,57 @@
+{
+  "title": "这篇文章最值得转发的图文速览",
+  "description": "自动提炼结论、版图、时间线与决策建议，支持横向浏览并导出图文卡片。",
+  "coverBadgeText": "研究特辑",
+  "filePrefix": "my-article",
+  "footerText": "尝鲜AI · 科技日报",
+  "coverDecorationText": "INSIGHT",
+  "logoUrl": "/logo.png",
+  "showCardNo": true,
+  "brandName": "尝鲜AI",
+  "brandSubtitle": "科技日报",
+  "followTerm": "关注公众号：尝鲜AI",
+  "cards": [
+    {
+      "id": "01",
+      "type": "cover",
+      "meta": "图文速览",
+      "title": "谁在吃掉这个市场的预算？",
+      "subtitle": "一句话副标题，直接说最强结论",
+      "layout": "cover-home",
+      "stats": [
+        {"label": "核心指标", "value": "数据 1"},
+        {"label": "关键玩家", "value": "数据 2"},
+        {"label": "热点方向", "value": "数据 3"},
+        {"label": "时间窗口", "value": "数据 4"}
+      ],
+      "bullets": ["结论 1", "结论 2", "结论 3"]
+    },
+    {
+      "id": "02",
+      "layout": "checklist",
+      "meta": "先看结论",
+      "title": "这篇文章最值得记住的几件事",
+      "subtitle": "先把结论看懂，再决定要不要深读",
+      "steps": ["结论 1", "结论 2", "结论 3", "结论 4"]
+    },
+    {
+      "id": "03",
+      "layout": "layers",
+      "meta": "版图拆解",
+      "title": "市场到底分成几条主线",
+      "subtitle": "把复杂内容拆成更容易传播的结构化卡片",
+      "layers": [
+        {"title": "类别 A", "value": "标签", "desc": "类别 A 的核心解释"},
+        {"title": "类别 B", "value": "标签", "desc": "类别 B 的核心解释"},
+        {"title": "类别 C", "value": "标签", "desc": "类别 C 的核心解释"}
+      ]
+    },
+    {
+      "id": "99",
+      "meta": "关注我们",
+      "title": "尝鲜AI",
+      "subtitle": "",
+      "kind": "cta"
+    }
+  ]
+}
