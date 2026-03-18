@@ -1,0 +1,4 @@
+interface:
+  display_name: "Changxian Blog Publisher"
+  short_description: "写作 + 发布 changxian-web 文章与图文卡片"
+  default_prompt: "Use $changxian-blog-publisher to draft and publish a new changxian-web post with the unified structure: Markdown article + JSON article record + generic /posts/:slug route + declarative poster.cards. Apply changxian writer-style article rules, then generate concise MiniMax-like information cards with conclusion-first sequencing and layouts such as cover-home/layers/metrics/timeline/checklist/cta."

@@ -1,0 +1,53 @@
+{
+  "id": "my-article",
+  "slug": "my-article",
+  "title": "文章标题",
+  "desc": "文章摘要",
+  "date": "2026-03-08",
+  "category": "工程实战",
+  "channel": "AI编程",
+  "tags": ["标签1", "标签2", "标签3"],
+  "read": "10 分钟",
+  "preset": "my-article",
+  "summary": [
+    "结论 1",
+    "结论 2",
+    "结论 3"
+  ],
+  "content": "## 导读\n\n这里写 Markdown 正文。",
+  "sources": [
+    {
+      "title": "来源标题",
+      "url": "https://example.com"
+    }
+  ],
+  "actions": [
+    {
+      "label": "查看详情",
+      "href": "https://example.com",
+      "variant": "primary",
+      "external": true
+    }
+  ],
+  "poster": {
+    "title": "这篇文章最值得转发的图文速览",
+    "description": "自动提炼结论、版图与时间线，支持横向浏览并导出。",
+    "coverBadgeText": "研究特辑",
+    "filePrefix": "my-article",
+    "footerText": "尝鲜AI · 科技日报",
+    "brandName": "尝鲜AI",
+    "brandSubtitle": "科技日报",
+    "followTerm": "关注公众号：尝鲜AI",
+    "logoUrl": "/logo.png",
+    "cards": [
+      {
+        "id": "01",
+        "type": "cover",
+        "meta": "图文速览",
+        "title": "更像爆款图文的封面标题",
+        "subtitle": "一句话说出最强结论",
+        "points": ["结论 1", "结论 2", "结论 3"]
+      }
+    ]
+  }
+}
