@@ -8,9 +8,13 @@ import {
   permissionOptionLabel,
 } from './telegram-permission-prompt.mjs';
 import { createTelegramChannelPublisher } from './telegram-channel-publisher.mjs';
+import { buildRuntimeControlKeyboard } from './telegram-controls.mjs';
+import { buildCommandPanelKeyboard } from './telegram-command-panels.mjs';
 
 const TELEGRAM_EDIT_RETRY_DELAY_MS = 800;
 const TELEGRAM_PROGRESS_EDIT_INTERVAL_MS = 1000;
+const TELEGRAM_COMMAND_SYNC_TTL_MS = 6 * 60 * 60 * 1000;
+const TELEGRAM_COMMAND_SYNC_RETRY_MS = 60 * 1000;
 
 function telegramErrorText(error) {
   return error?.description || error?.error?.description || error?.message || error?.error?.message || String(error);
@@ -59,6 +63,17 @@ function buildPermissionKeyboard(token, request) {
   });
   keyboard.text('取消', `rcperm:${token}:cancel`);
   return keyboard;
+}
+
+function mergeInlineKeyboards(...keyboards) {
+  const merged = new InlineKeyboard();
+  for (const keyboard of keyboards) {
+    const rows = Array.isArray(keyboard?.inline_keyboard) ? keyboard.inline_keyboard : [];
+    for (const row of rows) {
+      merged.inline_keyboard.push(row);
+    }
+  }
+  return merged.inline_keyboard.length ? merged : undefined;
 }
 
 async function editTelegramMessage({
@@ -148,6 +163,36 @@ export async function startTelegramAdapter(config, controller) {
   const permissionRegistry = createTelegramPermissionRegistry();
   const menuCommands = COMMAND_SPECS.map((spec) => ({ command: spec.name, description: spec.menuDescription }));
   let commandsSyncInFlight = false;
+  let lastCommandsSyncAtMs = 0;
+  let lastCommandsSyncErrorAtMs = 0;
+
+  async function ensureTelegramMenuCommands(force = false) {
+    const now = Date.now();
+    if (commandsSyncInFlight) return;
+    if (!force && lastCommandsSyncAtMs && now - lastCommandsSyncAtMs < TELEGRAM_COMMAND_SYNC_TTL_MS) return;
+    if (!force && lastCommandsSyncErrorAtMs && now - lastCommandsSyncErrorAtMs < TELEGRAM_COMMAND_SYNC_RETRY_MS) return;
+
+    commandsSyncInFlight = true;
+    try {
+      const scopes = [
+        undefined,
+        { type: 'all_private_chats' },
+      ];
+      for (const scope of scopes) {
+        const options = scope ? { scope } : undefined;
+        await bot.api.deleteMyCommands(options).catch(() => {});
+        await bot.api.setMyCommands(menuCommands, options);
+      }
+      await bot.api.setChatMenuButton({ menu_button: { type: 'commands' } }).catch(() => {});
+      lastCommandsSyncAtMs = Date.now();
+      lastCommandsSyncErrorAtMs = 0;
+    } catch (error) {
+      lastCommandsSyncErrorAtMs = Date.now();
+      console.warn('[telegram] failed to sync menu commands', error?.description || error?.message || error);
+    } finally {
+      commandsSyncInFlight = false;
+    }
+  }
 
   function prunePaginationSessions() {
     const cutoff = Date.now() - (6 * 60 * 60 * 1000);
@@ -255,6 +300,148 @@ export async function startTelegramAdapter(config, controller) {
     await ctx.answerCallbackQuery({ text, show_alert: false }).catch(() => {});
   });
 
+  bot.callbackQuery(/^rcctl:([^:]+):([^:]+)$/, async (ctx) => {
+    const kind = String(ctx.match?.[1] || '');
+    const value = String(ctx.match?.[2] || '');
+    const chatId = String(ctx.chat?.id || '');
+    let notice = '';
+    let text = '';
+    const request = {
+      host: 'telegram',
+      chatId,
+      externalChatId: String(ctx.chat?.id || ''),
+      externalUserId: ctx.from ? String(ctx.from.id) : '',
+      text: '',
+    };
+
+    let commandPanel;
+    if (kind === 'cli' && value === 'refresh') {
+      await ctx.answerCallbackQuery({ text: '正在检查 CLI 版本…', show_alert: false }).catch(() => {});
+      text = controller.buildCliPanelText(chatId, { checkLatest: true, force: true });
+    } else if (kind === 'cli' && value === 'update') {
+      await ctx.answerCallbackQuery({ text: '正在更新过期 CLI…', show_alert: false }).catch(() => {});
+      text = controller.runCliUpgrade(chatId);
+    } else if (kind === 'cmd') {
+      text = await controller.handleQuickCommand(value, request);
+      commandPanel = buildCommandPanelKeyboard(controller, chatId, value);
+    } else {
+      if (kind === 'backend') {
+        notice = controller.applyBackendSelection(chatId, value) || '无法切换后端。';
+      } else if (kind === 'perm') {
+        notice = controller.applyPermissionLevel(chatId, value) || '当前后端不支持这个权限档位。';
+      } else if (kind === 'session' && value === 'new') {
+        controller.store.clearChatSession(chatId);
+        notice = '已重置当前会话。';
+      } else if (kind !== 'refresh') {
+        await ctx.answerCallbackQuery({ text: '按钮已失效，请重新打开控制面板。', show_alert: false }).catch(() => {});
+        return;
+      }
+
+      text = controller.buildRuntimePanelText(chatId, notice);
+    }
+
+    const rendered = renderTelegramPayload({
+      status: 'Done',
+      text,
+    });
+    const keyboard = buildRuntimeControlKeyboard(controller, chatId);
+    const pages = rendered.pages || [rendered.html];
+    const token = rememberPagination(chatId, pages);
+    const replyMarkup = mergeInlineKeyboards(
+      token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
+      commandPanel,
+      keyboard,
+    );
+    const html = pages[0] || rendered.html;
+    const result = await editTelegramMessage({
+      edit: () => ctx.editMessageText(html, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+        reply_markup: replyMarkup,
+      }),
+      sendFallback: () => ctx.reply(html, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+        reply_markup: replyMarkup,
+      }),
+      logPrefix: '[telegram] runtime control edit failed',
+    });
+    if (!(kind === 'cli' && (value === 'refresh' || value === 'update'))) {
+      const answerText = result.ok ? (notice || '已刷新') : '刷新失败，请稍后重试';
+      await ctx.answerCallbackQuery({ text: answerText, show_alert: false }).catch(() => {});
+    }
+  });
+
+  bot.callbackQuery(/^rcctl:(schedule|role|channel|memory):([^:]+):(.+)$/, async (ctx) => {
+    const kind = String(ctx.match?.[1] || '');
+    const action = String(ctx.match?.[2] || '');
+    const target = String(ctx.match?.[3] || '');
+    const chatId = String(ctx.chat?.id || '');
+    const request = {
+      host: 'telegram',
+      chatId,
+      externalChatId: String(ctx.chat?.id || ''),
+      externalUserId: ctx.from ? String(ctx.from.id) : '',
+      text: '',
+    };
+
+    let text = '';
+    if (kind === 'schedule') {
+      if (action === 'run') text = await controller.handleScheduleCommand(chatId, `run ${target}`);
+      else if (action === 'show') text = await controller.handleScheduleCommand(chatId, `show ${target}`);
+      else if (action === 'toggle') {
+        const job = controller.store.getJob(chatId, target);
+        text = job
+          ? await controller.handleScheduleCommand(chatId, `${job.enabled ? 'pause' : 'resume'} ${target}`)
+          : 'Scheduled job not found';
+      }
+    } else if (kind === 'role') {
+      if (action === 'use') text = await controller.handleRoleCommand(chatId, `use ${target}`);
+      else if (action === 'show') text = await controller.handleRoleCommand(chatId, `show ${target}`);
+      else if (action === 'clear') text = await controller.handleRoleCommand(chatId, 'clear');
+    } else if (kind === 'channel') {
+      if (action === 'test') text = await controller.handleChannelCommand(request, `test ${target}`);
+    } else if (kind === 'memory') {
+      if (action === 'show' || action === 'pin' || action === 'delete') {
+        text = controller.handleMemoryPanelAction(chatId, action, target);
+      }
+    }
+
+    if (!text) {
+      await ctx.answerCallbackQuery({ text: '按钮已失效，请重新打开命令面板。', show_alert: false }).catch(() => {});
+      return;
+    }
+
+    const rendered = renderTelegramPayload({ status: 'Done', text });
+    const pages = rendered.pages || [rendered.html];
+    const token = rememberPagination(chatId, pages);
+    const commandPanel = buildCommandPanelKeyboard(controller, chatId, kind);
+    const keyboard = buildRuntimeControlKeyboard(controller, chatId);
+    const replyMarkup = mergeInlineKeyboards(
+      token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
+      commandPanel,
+      keyboard,
+    );
+    const html = pages[0] || rendered.html;
+
+    const result = await editTelegramMessage({
+      edit: () => ctx.editMessageText(html, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+        reply_markup: replyMarkup,
+      }),
+      sendFallback: () => ctx.reply(html, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+        reply_markup: replyMarkup,
+      }),
+      logPrefix: '[telegram] command panel edit failed',
+    });
+
+    const answerText = result.ok ? '已执行' : '执行失败，请稍后重试';
+    await ctx.answerCallbackQuery({ text: answerText, show_alert: false }).catch(() => {});
+  });
+
   function recordError(error, prefix = '[telegram] error') {
     status.connected = false;
     status.authenticated = false;
@@ -269,8 +456,9 @@ export async function startTelegramAdapter(config, controller) {
   bot.on('message:text', async (ctx) => {
     permissionRegistry.prune();
     status.lastMessageAt = Math.floor(Date.now() / 1000);
+    void ensureTelegramMenuCommands();
     const text = String(ctx.message.text || '').trim();
-    const sink = createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, permissionRegistry);
+    const sink = createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, permissionRegistry, controller);
     await controller.handleInput({
       host: 'telegram',
       chatId: String(ctx.chat.id),
@@ -286,16 +474,7 @@ export async function startTelegramAdapter(config, controller) {
       status.authenticated = true;
       status.botUsername = me.username || null;
       status.lastError = null;
-      if (!commandsSyncInFlight) {
-        commandsSyncInFlight = true;
-        void bot.api.setMyCommands(menuCommands)
-          .catch((error) => {
-            console.warn('[telegram] failed to sync menu commands', error?.description || error?.message || error);
-          })
-          .finally(() => {
-            commandsSyncInFlight = false;
-          });
-      }
+      void ensureTelegramMenuCommands(true);
     },
   }).catch((error) => {
     recordError(error, '[telegram] polling stopped');
@@ -323,7 +502,7 @@ export async function startTelegramAdapter(config, controller) {
   };
 }
 
-function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, permissionRegistry) {
+function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, permissionRegistry, controller) {
   let message = null;
   const sentImages = new Set();
   let editBackoffUntilMs = 0;
@@ -394,13 +573,18 @@ function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, pe
         { mode: 'progress' },
       );
     },
-    async final(payload) {
+    async final(payload, options = {}) {
       const rendered = renderTelegramPayload(payload);
       const pages = rendered.pages || [rendered.html];
       const token = rememberPagination(String(ctx.chat.id), pages);
+      const controls = options?.telegramControls ? buildRuntimeControlKeyboard(controller, String(options.telegramControls.chatId || ctx.chat.id)) : undefined;
+      const replyMarkup = mergeInlineKeyboards(
+        token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
+        controls,
+      );
       await upsertMessage(
         pages[0] || rendered.html,
-        token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
+        replyMarkup,
         { mode: 'final' },
       );
       await sendImages(rendered.images);

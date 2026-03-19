@@ -6,20 +6,31 @@
 - Send an image with an optional caption to start an image-aware task.
 - Use `/status` to inspect progress.
 - Use `/cancel` to stop the current task.
-- Use `/new` to reset the Codex session.
+- Use `/new` to reset the current backend session.
 
 ## Configuration Controls
 
 - `/cwd <path>` changes the working directory.
 - `/cmd low|readonly|high` switches the Codex permission tier when the chat uses the Codex backend.
-- `/cmd <custom-prefix>` can also point the current chat at `opencode acp` or `npx -y opencode-ai acp`.
-- `/backend codex|opencode-acp|default` switches the execution backend for the current chat.
+- `/cmd <custom-prefix>` can point the current chat at `claude`, `opencode acp`, or `npx -y opencode-ai acp`.
+- `/backend claude|codex|opencode-acp|default` switches the execution backend for the current chat.
 - `/setting output_file on|off` toggles output-file upload.
 - `/setting memory on|off` toggles memory injection.
 - `/setting scheduler on|off` toggles the scheduler.
 
+## Claude SDK
+
+- Install and authenticate Claude Code with `claude auth login`.
+- Use `/backend claude` to switch the current chat to Claude SDK.
+- Set `RC_DEFAULT_BACKEND=claude` to make Claude SDK the bridge default.
+- Set `RC_CLAUDE_COMMAND_PREFIX=claude --permission-mode acceptEdits` to change Claude permission behavior.
+- Set `RC_CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude` when the `claude` binary is not on `PATH`.
+
+See `references/claude-backend.md` for the full backend-specific setup and behavior notes.
+
 ## OpenCode ACP
 
+- Use `/backend claude` to switch away from Claude SDK when needed.
 - Install and authenticate OpenCode with `opencode auth login`.
 - Use `/backend opencode-acp` to switch the current chat to OpenCode ACP.
 - Use `/backend codex` to switch back to the Codex SDK backend.

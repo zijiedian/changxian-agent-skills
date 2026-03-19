@@ -51,6 +51,7 @@ export function loadConfig() {
   const defaultBackend = normalizeBackendAlias(process.env.RC_DEFAULT_BACKEND, BACKEND_CODEX);
   const codexCommandPrefix = String(process.env.CODEX_COMMAND_PREFIX || 'codex -a never --search exec -s danger-full-access --skip-git-repo-check').trim();
   const opencodeCommandPrefix = String(process.env.OPENCODE_ACP_COMMAND_PREFIX || 'opencode acp').trim();
+  const claudeCommandPrefix = String(process.env.RC_CLAUDE_COMMAND_PREFIX || 'claude').trim();
   return {
     stateDir,
     host: String(process.env.RC_HOST || '0.0.0.0').trim(),
@@ -67,8 +68,9 @@ export function loadConfig() {
     wecomWsUrl: String(process.env.WECOM_WEBSOCKET_URL || 'wss://openws.work.weixin.qq.com').trim(),
     defaultBackend,
     codexCommandPrefix,
+    claudeCommandPrefix,
     opencodeCommandPrefix,
-    defaultCommandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, opencodeCommandPrefix }, defaultBackend),
+    defaultCommandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, claudeCommandPrefix, opencodeCommandPrefix }, defaultBackend),
     codexTimeoutSeconds: Number.parseInt(process.env.CODEX_TIMEOUT_SECONDS || '21600', 10),
     opencodeTimeoutSeconds: Number.parseInt(process.env.OPENCODE_ACP_TIMEOUT_SECONDS || '21600', 10),
     defaultTimezone: String(process.env.RC_DEFAULT_TIMEZONE || 'Asia/Shanghai').trim(),

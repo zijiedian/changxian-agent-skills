@@ -5,7 +5,7 @@ Unified JavaScript runtime for changxian remote-control.
 - Telegram adapter: `grammy`
 - WeCom adapter: `@wecom/aibot-node-sdk`
 - Shared state: `better-sqlite3`
-- Backend runtimes: Codex SDK and OpenCode ACP
+- Backend runtimes: Codex SDK, Claude SDK, and OpenCode ACP
 - Shared auth, command registry, and host state store
 - Durable memory, reusable roles, and scheduled jobs are managed inside `changxian-remote-control` via `rc-memory-ops`, `rc-role-ops`, and `rc-schedule-ops`
 
@@ -20,6 +20,9 @@ npm run start
 Set credentials in `.env` before starting:
 
 - `TG_BOT_TOKEN` to enable Telegram
+- `RC_DEFAULT_BACKEND=claude` to make Claude SDK the default backend
+- `RC_CLAUDE_COMMAND_PREFIX=claude` to configure Claude command flags such as `--permission-mode`
+- `RC_CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude` when `claude` is not on `PATH`
 - `RC_DEFAULT_BACKEND=opencode-acp` to make OpenCode ACP the default backend
 - `OPENCODE_ACP_COMMAND_PREFIX=opencode acp` to run the OpenCode ACP backend
 - `OPENCODE_ACP_TIMEOUT_SECONDS` to control ACP task timeout
@@ -30,6 +33,30 @@ Set credentials in `.env` before starting:
 - `RC_AUTH_PASSPHRASE` to require authentication in chat before tasks can run
 
 Only adapters with valid credentials are started.
+
+## Claude SDK
+
+Claude can be used as the execution backend for Telegram or WeCom chats.
+
+Recommended setup:
+
+```bash
+claude auth login
+```
+
+Bridge config:
+
+```bash
+RC_DEFAULT_BACKEND=claude
+RC_CLAUDE_COMMAND_PREFIX=claude
+```
+
+Per-chat switching:
+
+- `/backend claude`
+- `/backend codex`
+- `/backend opencode-acp`
+- `/backend default`
 
 ## OpenCode ACP
 
@@ -51,6 +78,7 @@ OPENCODE_ACP_COMMAND_PREFIX=opencode acp
 
 Per-chat switching:
 
+- `/backend claude`
 - `/backend opencode-acp`
 - `/backend codex`
 - `/backend default`

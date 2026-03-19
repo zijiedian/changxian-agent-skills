@@ -100,6 +100,30 @@ test('runScheduledJob bypasses an active telegram task in the same chat', async 
   assert.notEqual(sink.finalCalls[0]?.text, '当前会话已有任务在运行，请稍后重试。');
 });
 
+test('runScheduledJob does not emit generic thinking progress updates', async () => {
+  const controller = createController();
+
+  const sink = createSink();
+  const result = await controller.runScheduledJob({
+    id: 'job-3',
+    chat_id: 'chat-1',
+    prompt_template: 'run scheduled job without progress',
+    role: '',
+    memory_scope: '',
+    workdir: os.tmpdir(),
+    command_prefix: DEFAULT_COMMAND_PREFIX,
+    session_policy: 'fresh',
+  }, sink, {
+    host: 'telegram',
+    taskHost: 'scheduler:job-3',
+    hostName: 'Telegram scheduled runtime',
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(sink.progressCalls, []);
+  assert.equal(sink.finalCalls.length, 1);
+});
+
 test('runTask still blocks an interactive telegram task while a scheduler task is running', async () => {
   const controller = createController();
   controller.tasks.set(controller.makeTaskKey('scheduler:job-1', 'chat-1'), runningEntry('scheduler:job-1', 'chat-1'));

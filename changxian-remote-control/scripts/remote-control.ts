@@ -11,6 +11,7 @@ type ArgMap = Record<string, string | boolean>;
 type HealthSnapshot = Record<string, any> | null;
 
 const DEFAULT_CODEX_COMMAND_PREFIX = 'codex -a never --search exec -s danger-full-access --skip-git-repo-check';
+const DEFAULT_CLAUDE_COMMAND_PREFIX = 'claude';
 const DEFAULT_OPENCODE_COMMAND_PREFIX = 'opencode acp';
 
 function codexHome() {
@@ -192,10 +193,11 @@ function runtimeSettings(stateDir: string) {
   const env = readEnvFile(path.join(stateDir, '.env'));
   const defaultBackend = normalizeBackendAlias(env.RC_DEFAULT_BACKEND || process.env.RC_DEFAULT_BACKEND, BACKEND_CODEX);
   const codexCommandPrefix = String(env.CODEX_COMMAND_PREFIX || process.env.CODEX_COMMAND_PREFIX || DEFAULT_CODEX_COMMAND_PREFIX).trim();
+  const claudeCommandPrefix = String(env.RC_CLAUDE_COMMAND_PREFIX || process.env.RC_CLAUDE_COMMAND_PREFIX || DEFAULT_CLAUDE_COMMAND_PREFIX).trim();
   const opencodeCommandPrefix = String(env.OPENCODE_ACP_COMMAND_PREFIX || process.env.OPENCODE_ACP_COMMAND_PREFIX || DEFAULT_OPENCODE_COMMAND_PREFIX).trim();
   return {
     defaultBackend,
-    commandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, opencodeCommandPrefix }, defaultBackend),
+    commandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, claudeCommandPrefix, opencodeCommandPrefix }, defaultBackend),
     workdir: path.resolve(String(env.RC_DEFAULT_WORKDIR || process.env.RC_DEFAULT_WORKDIR || process.cwd()).trim() || process.cwd()),
     logFile: path.resolve(String(env.RC_LOG_FILE || process.env.RC_LOG_FILE || bridgeLogFile(stateDir)).trim()),
   };

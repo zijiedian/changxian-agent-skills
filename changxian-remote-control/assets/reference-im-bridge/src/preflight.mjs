@@ -2,12 +2,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
-import { detectBackend, BACKEND_CODEX } from './backend-detection.mjs';
+import {
+  BACKEND_CLAUDE,
+  BACKEND_CODEX,
+  BACKEND_OPENCODE_ACP,
+  detectBackend,
+} from './backend-detection.mjs';
 import { redactedCommandText, splitShellArgs } from './utils.mjs';
 
-const REMOTE_CONTROL_ENV_RE = /^(?:TG_|WECOM_|RC_AUTH_|RC_CODEX_|RC_OPENCODE_|RC_DEFAULT_BACKEND$|RC_HOST$|RC_PORT$|RC_ENABLE_|RC_MEMORY_|RC_SCHEDULER_|RC_REPLY_|RC_MAX_|RC_DEFAULT_TIMEZONE$|OPENCODE_ACP_)/;
+const REMOTE_CONTROL_ENV_RE = /^(?:TG_|WECOM_|RC_AUTH_|RC_CODEX_|RC_CLAUDE_|RC_OPENCODE_|RC_DEFAULT_BACKEND$|RC_HOST$|RC_PORT$|RC_ENABLE_|RC_MEMORY_|RC_SCHEDULER_|RC_REPLY_|RC_MAX_|RC_DEFAULT_TIMEZONE$|OPENCODE_ACP_)/;
 const VERSION_PROBE_ARGS = [['--version'], ['version'], ['-v']];
 const CODEX_AUTH_PROBE_ARGS = [['login', 'status'], ['auth', 'status']];
+const CLAUDE_AUTH_PROBE_ARGS = [['auth', 'status']];
 
 function firstLine(text) {
   return String(text || '')
@@ -49,6 +55,12 @@ function runProbe(executable, args, env) {
   };
 }
 
+function configuredClaudeExecutable() {
+  const value = String(process.env.RC_CLAUDE_CODE_EXECUTABLE || '').trim();
+  if (!value) return '';
+  return fs.existsSync(value) ? path.resolve(value) : '';
+}
+
 export function buildExecutionEnv(baseEnv = process.env, overrides = {}) {
   const env = { ...baseEnv };
   for (const key of Object.keys(env)) {
@@ -81,15 +93,23 @@ export function runCommandPreflight(options = {}) {
   pushCheck('workdir', fs.existsSync(workdir) && fs.statSync(workdir).isDirectory(), workdir);
   pushCheck(
     'backend',
-    backend === BACKEND_CODEX || backend === 'opencode-acp',
-    backend === BACKEND_CODEX ? 'codex sdk' : backend === 'opencode-acp' ? 'opencode acp' : 'unsupported command prefix',
+    backend === BACKEND_CODEX || backend === BACKEND_CLAUDE || backend === BACKEND_OPENCODE_ACP,
+    backend === BACKEND_CODEX
+      ? 'codex sdk'
+      : backend === BACKEND_CLAUDE
+        ? 'claude sdk'
+        : backend === BACKEND_OPENCODE_ACP
+          ? 'opencode acp'
+          : 'unsupported command prefix',
   );
 
   if (args.some((arg) => /<[^>]+>/.test(arg))) {
     pushCheck('command-template', false, 'command prefix still contains angle-bracket placeholders');
   }
 
-  const resolvedPath = executable ? which(executable, shell, env) : '';
+  const resolvedPath = executable
+    ? which(executable, shell, env) || (backend === BACKEND_CLAUDE ? configuredClaudeExecutable() : '')
+    : '';
   pushCheck('executable', Boolean(resolvedPath), resolvedPath || `${executable || '(empty)'} not found in PATH`);
 
   let version = '';
@@ -117,6 +137,18 @@ export function runCommandPreflight(options = {}) {
     }
     if (auth) {
       pushCheck('auth', authOk, auth || 'codex login status failed', authOk ? 'info' : 'warn');
+    }
+  } else if (includeAuthProbe && resolvedPath && backend === BACKEND_CLAUDE) {
+    let authOk = false;
+    for (const probeArgs of CLAUDE_AUTH_PROBE_ARGS) {
+      const probe = runProbe(resolvedPath, probeArgs, env);
+      auth = firstLine(probe.stdout || probe.stderr || probe.error);
+      if (!probe.ok) continue;
+      authOk = /loggedIn.*true|logged.in/i.test(`${probe.stdout}\n${probe.stderr}`);
+      break;
+    }
+    if (auth) {
+      pushCheck('auth', authOk, auth || "run 'claude auth login'", authOk ? 'info' : 'warn');
     }
   }
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "Changxian Remote Control"
-  short_description: "Operate remote bridges, schedules, and backends"
-  default_prompt: "Use $changxian-remote-control to run the Telegram or WeCom bridge, switch Codex/OpenCode backends, or manage bridge-backed memory, roles, schedules, and immediate scheduled-job runs."
+  short_description: "Operate remote bridges, schedules, and Claude/Codex/OpenCode backends"
+  default_prompt: "Use $changxian-remote-control to run the Telegram or WeCom bridge, switch Claude/Codex/OpenCode backends, or manage bridge-backed memory, roles, schedules, and immediate scheduled-job runs."

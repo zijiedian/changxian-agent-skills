@@ -4,6 +4,7 @@ import { splitShellArgs } from './utils.mjs';
 
 export const BACKEND_CODEX = 'codex';
 export const BACKEND_OPENCODE_ACP = 'opencode-acp';
+export const BACKEND_CLAUDE = 'claude';
 export const BACKEND_UNSUPPORTED = 'unsupported';
 
 function normalizeToken(token) {
@@ -21,6 +22,7 @@ export function detectBackendFromArgs(args = []) {
 
   const base = normalizeToken(tokens[0]);
   if (base === 'codex') return BACKEND_CODEX;
+  if (base === 'claude') return BACKEND_CLAUDE;
 
   if (isOpencodePackageToken(tokens[0]) && tokens.slice(1).some((token) => normalizeToken(token) === 'acp')) {
     return BACKEND_OPENCODE_ACP;
@@ -46,6 +48,7 @@ export function normalizeBackendAlias(value, fallback = BACKEND_UNSUPPORTED) {
   const normalized = String(value || '').trim().toLowerCase();
   if (!normalized) return fallback;
   if (normalized === BACKEND_CODEX) return BACKEND_CODEX;
+  if (normalized === BACKEND_CLAUDE) return BACKEND_CLAUDE;
   if (['opencode', 'acp', BACKEND_OPENCODE_ACP].includes(normalized)) return BACKEND_OPENCODE_ACP;
   if (['default', 'reset', 'clear'].includes(normalized)) return 'default';
   return fallback;
@@ -53,11 +56,13 @@ export function normalizeBackendAlias(value, fallback = BACKEND_UNSUPPORTED) {
 
 export function defaultCommandPrefixForBackend(config = {}, backend = BACKEND_CODEX) {
   if (backend === BACKEND_OPENCODE_ACP) return String(config.opencodeCommandPrefix || 'opencode acp').trim();
+  if (backend === BACKEND_CLAUDE) return String(config.claudeCommandPrefix || 'claude').trim();
   return String(config.codexCommandPrefix || '').trim();
 }
 
 export function backendLabel(backend = BACKEND_UNSUPPORTED) {
   if (backend === BACKEND_CODEX) return 'Codex SDK';
   if (backend === BACKEND_OPENCODE_ACP) return 'OpenCode ACP';
+  if (backend === BACKEND_CLAUDE) return 'Claude SDK';
   return 'Unsupported';
 }

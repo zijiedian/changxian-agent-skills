@@ -6,17 +6,27 @@ import { applyAssistantOps } from './assistant_ops.mjs';
 import {
   BACKEND_CODEX,
   BACKEND_OPENCODE_ACP,
+  BACKEND_CLAUDE,
   backendLabel,
   defaultCommandPrefixForBackend,
   detectBackend,
   normalizeBackendAlias,
 } from './backend-detection.mjs';
 import { CodexSdkProvider } from './codex-sdk-provider.mjs';
+import { ClaudeSdkProvider } from './claude-sdk-provider.mjs';
 import { extractStructuredPreview } from './codex.mjs';
 import { OpencodeAcpProvider } from './opencode-acp-provider.mjs';
 import { buildExecutionEnv, runCommandPreflight } from './preflight.mjs';
 import { parseChannelCommandInput } from './telegram-channel-publisher.mjs';
 import { redactedCommandText, truncateText } from './utils.mjs';
+import {
+  buildClaudePermissionPrefix,
+  buildCodexPermissionPrefix,
+  buildRuntimeControlState,
+  isClaudePermissionLevel,
+  isCodexPermissionLevel,
+} from './runtime-controls.mjs';
+import { CliToolsManager, formatCliStatusLine, summarizeUpdateResult } from './cli-tools.mjs';
 
 const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[CURRENT TASK]'];
 const PREFLIGHT_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -74,7 +84,9 @@ export class RuntimeController {
     this.scheduler = null;
     this.preflightCache = new Map();
     this.codexSdk = new CodexSdkProvider(config, buildExecutionEnv);
+    this.claudeSdk = new ClaudeSdkProvider(config, buildExecutionEnv);
     this.opencodeAcp = new OpencodeAcpProvider(config, buildExecutionEnv);
+    this.cliTools = new CliToolsManager(() => this.executionEnv());
     this.telegramChannelPublisher = null;
   }
 
@@ -160,9 +172,14 @@ export class RuntimeController {
     return detectBackend(this.effectiveCommandPrefix(chatId));
   }
 
+  runtimeControlState(chatId) {
+    return buildRuntimeControlState(this.effectiveBackend(chatId), this.effectiveCommandPrefix(chatId), this.config);
+  }
+
   backendProvider(backend) {
     if (backend === BACKEND_CODEX) return this.codexSdk;
     if (backend === BACKEND_OPENCODE_ACP) return this.opencodeAcp;
+    if (backend === BACKEND_CLAUDE) return this.claudeSdk;
     return null;
   }
 
@@ -305,11 +322,11 @@ export class RuntimeController {
     }
 
     if (spec.name === 'start') {
-      const lines = ['remote-control', ...helpLines()];
+      const lines = ['remote-control', ...helpLines(), '', this.buildRuntimePanelText(chatId)];
       if (this.isSecondFactorEnabled() && !this.isAuthenticated(request)) {
         lines.push('', this.authRequiredText());
       }
-      await sink.final(lines.join('\n'));
+      await sink.final(lines.join('\n'), { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'run') {
@@ -321,16 +338,7 @@ export class RuntimeController {
       return true;
     }
     if (spec.name === 'status') {
-      await sink.final([
-        `workdir: ${this.effectiveWorkdir(chatId)}`,
-        `role: ${this.activeRoleName(chatId) || '(none)'}`,
-        `memory: ${this.config.enableMemory ? 'enabled' : 'disabled'}`,
-        `scheduler: ${this.config.enableScheduler ? 'enabled' : 'disabled'}`,
-        `telegram_channels: ${Object.keys(this.config.tgChannelTargets || {}).length}`,
-        `telegram_default_channel: ${this.config.tgDefaultChannel || '(none)'}`,
-        `command: ${this.displayCommandPrefix(chatId)}`,
-        `running: ${this.hasRunningTaskForChat(chatId) ? 'yes' : 'no'}`,
-      ].join('\n'));
+      await sink.final(this.buildRuntimePanelText(chatId), { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'new') {
@@ -369,42 +377,34 @@ export class RuntimeController {
     }
     if (spec.name === 'cmd') {
       if (!rest) {
-        await sink.final(this.displayCommandPrefix(chatId));
+        await sink.final(this.buildRuntimePanelText(chatId), { telegramControls: { chatId } });
         return true;
       }
       if (['clear', 'reset', 'default'].includes(rest.toLowerCase())) {
         this.store.clearChatCommandPrefix(chatId);
-        await sink.final(this.displayCommandPrefix(chatId));
+        await sink.final(this.buildRuntimePanelText(chatId, '已恢复默认命令前缀。'), { telegramControls: { chatId } });
+        return true;
+      }
+      const permissionUpdate = this.applyPermissionLevel(chatId, rest);
+      if (permissionUpdate) {
+        await sink.final(this.buildRuntimePanelText(chatId, permissionUpdate), { telegramControls: { chatId } });
         return true;
       }
       this.store.setChatCommandPrefix(chatId, rest);
-      await sink.final(this.effectiveCommandPrefix(chatId));
+      await sink.final(this.buildRuntimePanelText(chatId, '已更新命令前缀。'), { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'backend') {
       if (!rest) {
-        const backend = this.effectiveBackend(chatId);
-        await sink.final(`backend: ${backend}\nlabel: ${backendLabel(backend)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
+        await sink.final(this.buildRuntimePanelText(chatId), { telegramControls: { chatId } });
         return true;
       }
-      const value = normalizeBackendAlias(rest);
-      if (value === 'default') {
-        this.store.clearChatCommandPrefix(chatId);
-        const backend = this.effectiveBackend(chatId);
-        await sink.final(`已恢复默认后端: ${backendLabel(backend)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
+      const updated = this.applyBackendSelection(chatId, rest);
+      if (updated) {
+        await sink.final(this.buildRuntimePanelText(chatId, updated), { telegramControls: { chatId } });
         return true;
       }
-      if (value === BACKEND_CODEX) {
-        this.store.setChatCommandPrefix(chatId, this.config.codexCommandPrefix);
-        await sink.final(`已切到 ${backendLabel(BACKEND_CODEX)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
-        return true;
-      }
-      if (value === BACKEND_OPENCODE_ACP) {
-        this.store.setChatCommandPrefix(chatId, this.config.opencodeCommandPrefix);
-        await sink.final(`已切到 ${backendLabel(BACKEND_OPENCODE_ACP)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
-        return true;
-      }
-      await sink.final('Unsupported backend\nUsage\n/backend codex\n/backend opencode-acp\n/backend default');
+      await sink.final('Unsupported backend\nUsage\n/backend claude\n/backend codex\n/backend opencode-acp\n/backend default', { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'memory') {
@@ -428,7 +428,15 @@ export class RuntimeController {
       return true;
     }
     if (spec.name === 'setting') {
-      await sink.final(this.handleSettingCommand());
+      await sink.final(`${this.handleSettingCommand()}\n\n${this.buildRuntimePanelText(chatId)}`, { telegramControls: { chatId } });
+      return true;
+    }
+    if (spec.name === 'cli') {
+      await sink.final(this.buildCliPanelText(chatId, { checkLatest: true, force: true }), { telegramControls: { chatId } });
+      return true;
+    }
+    if (spec.name === 'upgrade') {
+      await sink.final(this.runCliUpgrade(chatId), { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'auth') {
@@ -474,6 +482,7 @@ export class RuntimeController {
 
   handleSettingCommand() {
     const codexSdk = this.codexSdk.getDiagnostics();
+    const claudeSdk = this.claudeSdk.getDiagnostics();
     const opencodeAcp = this.opencodeAcp.getDiagnostics();
     return [
       `default_backend: ${this.config.defaultBackend}`,
@@ -487,6 +496,7 @@ export class RuntimeController {
       `default_workdir: ${this.config.defaultWorkdir}`,
       `default_command_prefix: ${redactedCommandText(this.config.defaultCommandPrefix)}`,
       `codex_command_prefix: ${redactedCommandText(this.config.codexCommandPrefix)}`,
+      `claude_command_prefix: ${redactedCommandText(this.config.claudeCommandPrefix || 'claude')}`,
       `opencode_acp_command_prefix: ${redactedCommandText(this.config.opencodeCommandPrefix)}`,
       `codex_sdk: ${codexSdk.initialized ? 'initialized' : 'lazy'}`,
       `codex_model_passthrough: ${codexSdk.modelPassthrough ? 'enabled' : 'disabled'}`,
@@ -495,6 +505,10 @@ export class RuntimeController {
       ...(codexSdk.lastInitError ? [`codex_last_init_error: ${codexSdk.lastInitError}`] : []),
       ...(codexSdk.lastResumeSkipReason ? [`codex_last_resume_skip: ${codexSdk.lastResumeSkipReason}`] : []),
       ...(codexSdk.lastTransientRetryReason ? [`codex_last_transient_retry: ${codexSdk.lastTransientRetryReason}`] : []),
+      `claude_sdk: ${claudeSdk.initialized ? 'initialized' : 'lazy'}`,
+      `claude_cli: ${claudeSdk.cliPath || '(not found)'}`,
+      `claude_version: ${claudeSdk.cliVersion || 'unknown'}`,
+      ...(claudeSdk.lastInitError ? [`claude_last_init_error: ${claudeSdk.lastInitError}`] : []),
       `opencode_acp: ${opencodeAcp.initialized ? 'initialized' : 'lazy'}`,
       `opencode_agent: ${[opencodeAcp.agentName, opencodeAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
       `opencode_auth_methods: ${opencodeAcp.authMethods?.length ? opencodeAcp.authMethods.join(', ') : '(none reported)'}`,
@@ -503,6 +517,176 @@ export class RuntimeController {
       ...(opencodeAcp.lastPermissionDecision ? [`opencode_last_permission: ${opencodeAcp.lastPermissionDecision}`] : []),
       ...(opencodeAcp.lastStopReason ? [`opencode_last_stop_reason: ${opencodeAcp.lastStopReason}`] : []),
     ].join('\n');
+  }
+
+  statusLines(chatId, { includeCli = true } = {}) {
+    const backend = this.effectiveBackend(chatId);
+    const controls = this.runtimeControlState(chatId);
+    const lines = [
+      `backend: ${backendLabel(backend)}`,
+      `permission: ${controls.permissionLabel}`,
+      `workdir: ${this.effectiveWorkdir(chatId)}`,
+      `role: ${this.activeRoleName(chatId) || '(none)'}`,
+      `memory: ${this.config.enableMemory ? 'enabled' : 'disabled'}`,
+      `scheduler: ${this.config.enableScheduler ? 'enabled' : 'disabled'}`,
+      `telegram_channels: ${Object.keys(this.config.tgChannelTargets || {}).length}`,
+      `telegram_default_channel: ${this.config.tgDefaultChannel || '(none)'}`,
+      `command: ${this.displayCommandPrefix(chatId)}`,
+      `running: ${this.hasRunningTaskForChat(chatId) ? 'yes' : 'no'}`,
+    ];
+    if (includeCli) lines.push(...this.cliStatusLines());
+    return lines;
+  }
+
+  buildRuntimePanelText(chatId, notice = '', { includeCli = true } = {}) {
+    const lines = [];
+    if (notice) lines.push(notice, '');
+    lines.push('Remote Control', ...this.statusLines(chatId, { includeCli }));
+    return lines.join('\n');
+  }
+
+  cliStatusLines({ checkLatest = false, force = false } = {}) {
+    const snapshot = this.cliTools.getSnapshot({ checkLatest, force });
+    return snapshot.statuses.map((status) => formatCliStatusLine(status));
+  }
+
+  buildCliPanelText(chatId, { notice = '', checkLatest = false, force = false } = {}) {
+    const lines = [];
+    if (notice) lines.push(notice, '');
+    lines.push('CLI 状态', ...this.cliStatusLines({ checkLatest, force }), '', this.buildRuntimePanelText(chatId, '', { includeCli: false }));
+    return lines.join('\n');
+  }
+
+  runCliUpgrade(chatId) {
+    const result = this.cliTools.updateOutdated();
+    return `${summarizeUpdateResult(result)}\n\n${this.buildCliPanelText(chatId, { checkLatest: true, force: true })}`;
+  }
+
+  async handleQuickCommand(action, request) {
+    const chatId = String(request.chatId);
+    const normalized = String(action || '').trim().toLowerCase();
+
+    if (!normalized || normalized === 'status') {
+      return this.buildRuntimePanelText(chatId);
+    }
+    if (normalized === 'setting') {
+      return `${this.handleSettingCommand()}\n\n${this.buildRuntimePanelText(chatId, '', { includeCli: false })}`;
+    }
+    if (normalized === 'cli') {
+      return this.buildCliPanelText(chatId, { checkLatest: true, force: true });
+    }
+    if (normalized === 'skill') {
+      return this.handleSkillCommand();
+    }
+    if (normalized === 'role') {
+      return this.handleRoleCommand(chatId, '');
+    }
+    if (normalized === 'memory') {
+      return this.handleMemoryCommand(chatId, '', request);
+    }
+    if (normalized === 'schedule') {
+      return this.handleScheduleCommand(chatId, '');
+    }
+    if (normalized === 'channel') {
+      return this.handleChannelCommand(request, '');
+    }
+    if (normalized === 'cancel') {
+      const task = this.getTaskForChat(chatId);
+      if (!task) return this.buildRuntimePanelText(chatId, '当前没有正在运行的任务。');
+      task.cancel();
+      return this.buildRuntimePanelText(chatId, '已请求取消当前任务。');
+    }
+
+    return this.buildRuntimePanelText(chatId, '未识别的快捷操作。');
+  }
+
+  handleMemoryPanelAction(chatId, action, memoryId) {
+    const memory = this.store.getMemory(chatId, memoryId);
+    if (!memory) return 'Memory not found';
+
+    if (action === 'show') {
+      return [
+        `Memory: ${memory.id}`,
+        `Scope: ${memory.scope}`,
+        `Pinned: ${memory.pinned ? 'yes' : 'no'}`,
+        memory.title ? `Title: ${memory.title}` : '',
+        '',
+        String(memory.content || '').trim(),
+      ].filter(Boolean).join('\n');
+    }
+
+    if (action === 'pin') {
+      const nextPinned = !memory.pinned;
+      this.store.setMemoryPinned(chatId, memoryId, nextPinned);
+      return `Memory ${nextPinned ? 'pinned' : 'unpinned'}\nID: ${memoryId}`;
+    }
+
+    if (action === 'delete') {
+      const deleted = this.store.deleteMemory(chatId, memoryId);
+      return deleted ? `Memory removed\nID: ${memoryId}` : 'Memory not found';
+    }
+
+    return 'Unknown memory action';
+  }
+
+  applyBackendSelection(chatId, value) {
+    const normalized = normalizeBackendAlias(value);
+    if (normalized === 'default') {
+      this.store.clearChatCommandPrefix(chatId);
+      const backend = this.effectiveBackend(chatId);
+      return `已恢复默认后端: ${backendLabel(backend)}`;
+    }
+    if (normalized === BACKEND_CODEX) {
+      this.store.setChatCommandPrefix(chatId, this.config.codexCommandPrefix);
+      return `已切到 ${backendLabel(BACKEND_CODEX)}`;
+    }
+    if (normalized === BACKEND_OPENCODE_ACP) {
+      this.store.setChatCommandPrefix(chatId, this.config.opencodeCommandPrefix);
+      return `已切到 ${backendLabel(BACKEND_OPENCODE_ACP)}`;
+    }
+    if (normalized === BACKEND_CLAUDE) {
+      this.store.setChatCommandPrefix(chatId, this.config.claudeCommandPrefix || 'claude');
+      return `已切到 ${backendLabel(BACKEND_CLAUDE)}`;
+    }
+    return '';
+  }
+
+  applyPermissionLevel(chatId, value) {
+    const normalized = String(value || '').trim().toLowerCase() === 'acceptedits'
+      ? 'accept'
+      : String(value || '').trim().toLowerCase();
+    const backend = this.effectiveBackend(chatId);
+    const currentPrefix = this.effectiveCommandPrefix(chatId);
+    const knownCodexLevel = isCodexPermissionLevel(normalized);
+    const knownClaudeLevel = isClaudePermissionLevel(normalized);
+
+    if (backend === BACKEND_CODEX && knownCodexLevel) {
+      this.store.setChatCommandPrefix(chatId, buildCodexPermissionPrefix(normalized, this.config, currentPrefix));
+      return `已切到 Codex 权限: ${this.runtimeControlState(chatId).permissionLabel}`;
+    }
+
+    if (backend === BACKEND_CLAUDE && knownClaudeLevel) {
+      this.store.setChatCommandPrefix(chatId, buildClaudePermissionPrefix(normalized, this.config, currentPrefix));
+      return `已切到 Claude 权限: ${this.runtimeControlState(chatId).permissionLabel}`;
+    }
+
+    if (backend === BACKEND_OPENCODE_ACP && (knownCodexLevel || knownClaudeLevel)) {
+      return 'OpenCode ACP 的权限由后端自己控制，当前桥接不提供快捷权限档位。';
+    }
+
+    if ((knownCodexLevel || knownClaudeLevel) && backend !== BACKEND_CODEX && backend !== BACKEND_CLAUDE) {
+      return '当前后端不支持这个快捷权限档位。';
+    }
+
+    if (backend === BACKEND_CODEX && knownClaudeLevel) {
+      return 'Codex 后端只支持 readonly / low / high 快捷权限档位。';
+    }
+
+    if (backend === BACKEND_CLAUDE && knownCodexLevel) {
+      return 'Claude 后端只支持 default / plan / accept 快捷权限档位。';
+    }
+
+    return '';
   }
 
   handleRoleCommand(chatId, raw) {
@@ -776,16 +960,19 @@ export class RuntimeController {
     console.info(`[runtime] task start(sdk) host=${taskHost} chat=${chatId} cwd=${workdir} prompt=${truncateText(request.text, 120)}`);
     const started = Date.now();
     const abortController = new AbortController();
-    let leadingThinkingActive = true;
-    const thinkingTicker = setInterval(() => {
-      if (!leadingThinkingActive || abortController.signal.aborted) return;
-      sink.progress({
-        status: 'Running',
-        marker: 'thinking',
-        text: 'thinking...',
-        elapsedSeconds: (Date.now() - started) / 1000,
-      }).catch(() => {});
-    }, 1000);
+    const suppressProgress = Boolean(options.suppressProgress);
+    let leadingThinkingActive = !suppressProgress;
+    const thinkingTicker = suppressProgress
+      ? null
+      : setInterval(() => {
+        if (!leadingThinkingActive || abortController.signal.aborted) return;
+        sink.progress({
+          status: 'Running',
+          marker: 'thinking',
+          text: 'thinking...',
+          elapsedSeconds: (Date.now() - started) / 1000,
+        }).catch(() => {});
+      }, 1000);
     this.tasks.set(taskKey, {
       host: taskHost,
       chatId,
@@ -794,7 +981,9 @@ export class RuntimeController {
     });
 
     try {
-      await sink.progress({ status: 'Running', marker: 'thinking', text: 'thinking...', elapsedSeconds: 0 });
+      if (!suppressProgress) {
+        await sink.progress({ status: 'Running', marker: 'thinking', text: 'thinking...', elapsedSeconds: 0 });
+      }
       const preparedPrompt = this.buildPrompt(chatId, request.text, options.hostName || request.host, {
         roleName: options.roleName || '',
         memoryScope: options.memoryScope || '',
@@ -817,6 +1006,7 @@ export class RuntimeController {
           ? (permissionRequest, meta = {}) => sink.requestPermission(permissionRequest, meta)
           : undefined,
         onProgress: async (payload) => {
+          if (suppressProgress) return;
           const elapsedSeconds = (Date.now() - started) / 1000;
           const previewBody = String(payload?.text || payload?.preview?.summary || payload?.preview?.content || '').trim() || 'thinking...';
           if (payload?.marker !== 'thinking' || previewBody.toLowerCase() !== 'thinking...') {
@@ -876,7 +1066,7 @@ export class RuntimeController {
       return { success: false, summary: message, errorText: message };
     } finally {
       leadingThinkingActive = false;
-      clearInterval(thinkingTicker);
+      if (thinkingTicker) clearInterval(thinkingTicker);
       this.tasks.delete(taskKey);
     }
   }
@@ -897,6 +1087,7 @@ export class RuntimeController {
     }, sink, {
       hostName: options.hostName || 'scheduled runtime',
       taskHost: options.taskHost || 'scheduler',
+      suppressProgress: Object.prototype.hasOwnProperty.call(options, 'suppressProgress') ? options.suppressProgress : true,
       roleName: String(job.role || '').trim(),
       memoryScope: String(job.memory_scope || '').trim() || this.defaultMemoryScope(chatId),
       workdir: String(job.workdir || '').trim() || this.effectiveWorkdir(chatId),

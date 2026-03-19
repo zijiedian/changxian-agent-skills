@@ -34,7 +34,7 @@ const adapterMap = {};
 let readinessTimer = null;
 const requestedAdapters = [];
 const defaultCommandPreflight = runCommandPreflight({
-  commandPrefix: config.codexCommandPrefix,
+  commandPrefix: config.defaultCommandPrefix,
   workdir: config.defaultWorkdir,
 });
 if (config.tgBotToken) requestedAdapters.push('telegram');
@@ -82,6 +82,8 @@ function bootSnapshot() {
     diagnostics: {
       defaultCommandPreflight: { ...bootState.diagnostics.defaultCommandPreflight },
       codexSdk: controller.codexSdk.getDiagnostics(),
+      claudeSdk: controller.claudeSdk.getDiagnostics(),
+      opencodeAcp: controller.opencodeAcp.getDiagnostics(),
     },
   };
 }
@@ -172,6 +174,8 @@ const server = http.createServer((req, res) => {
       diagnostics: {
         defaultCommandPreflight: { ...bootState.diagnostics.defaultCommandPreflight },
         codexSdk: controller.codexSdk.getDiagnostics(),
+        claudeSdk: controller.claudeSdk.getDiagnostics(),
+        opencodeAcp: controller.opencodeAcp.getDiagnostics(),
       },
     }));
     return;
