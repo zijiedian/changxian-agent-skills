@@ -7,6 +7,7 @@ import {
   BACKEND_CODEX,
   BACKEND_OPENCODE_ACP,
   BACKEND_CLAUDE,
+  BACKEND_PI,
   backendLabel,
   defaultCommandPrefixForBackend,
   detectBackend,
@@ -16,6 +17,7 @@ import { CodexSdkProvider } from './codex-sdk-provider.mjs';
 import { ClaudeSdkProvider } from './claude-sdk-provider.mjs';
 import { extractStructuredPreview } from './codex.mjs';
 import { OpencodeAcpProvider } from './opencode-acp-provider.mjs';
+import { PiCliProvider } from './pi-cli-provider.mjs';
 import { buildExecutionEnv, runCommandPreflight } from './preflight.mjs';
 import { parseChannelCommandInput } from './telegram-channel-publisher.mjs';
 import { redactedCommandText, truncateText } from './utils.mjs';
@@ -27,8 +29,14 @@ import {
   isCodexPermissionLevel,
 } from './runtime-controls.mjs';
 import { CliToolsManager, formatCliStatusLine, summarizeUpdateResult } from './cli-tools.mjs';
+import {
+  listSystemMcpServers,
+  listSystemSkills,
+  setSystemMcpEnabled,
+  setSystemSkillEnabled,
+} from './resource-registry.mjs';
 
-const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[CURRENT TASK]'];
+const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[RECENT DIALOGUE]', '[CURRENT TASK]'];
 const PREFLIGHT_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function balanceMarkdownFences(text) {
@@ -75,6 +83,45 @@ function looksLikeContextPreview(text, prompt) {
   return Boolean(normalizedPrompt && (normalizedValue === normalizedPrompt || normalizedValue.startsWith(normalizedPrompt)));
 }
 
+function summarizeMemoryRecord(record) {
+  const flags = [];
+  if (record?.pinned) flags.push('pinned');
+  if (record?.importance != null && Number(record.importance) > 0) flags.push(`importance=${Number(record.importance)}`);
+  const header = [
+    record?.id || '',
+    record?.kind ? `[${record.kind}]` : '',
+    flags.length ? `(${flags.join(', ')})` : '',
+    record?.title || '',
+  ].filter(Boolean).join(' ');
+  const body = String(record?.content || '').replace(/\s+/g, ' ').trim();
+  return `- ${header}\n  ${body}`;
+}
+
+function summarizeConversationMessage(entry) {
+  const role = String(entry?.role || '').trim() || 'user';
+  const content = String(entry?.content || '').replace(/\s+/g, ' ').trim();
+  if (!content) return '';
+  return `- ${role}: ${truncateText(content, 220)}`;
+}
+
+function shortenHomePath(filePath = '') {
+  const value = String(filePath || '').trim();
+  if (!value) return '';
+  const home = process.env.HOME || '';
+  if (home && value.startsWith(home)) return `~${value.slice(home.length)}`;
+  return value;
+}
+
+function paginateItems(items = [], page = 0, pageSize = 4) {
+  const total = Array.isArray(items) ? items.length : 0;
+  const size = Math.max(1, Number(pageSize) || 4);
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const currentPage = Math.max(0, Math.min(Number(page) || 0, totalPages - 1));
+  const start = currentPage * size;
+  const slice = items.slice(start, start + size);
+  return { items: slice, page: currentPage, pageSize: size, total, totalPages };
+}
+
 export class RuntimeController {
   constructor(config, store) {
     this.config = config;
@@ -86,6 +133,7 @@ export class RuntimeController {
     this.codexSdk = new CodexSdkProvider(config, buildExecutionEnv);
     this.claudeSdk = new ClaudeSdkProvider(config, buildExecutionEnv);
     this.opencodeAcp = new OpencodeAcpProvider(config, buildExecutionEnv);
+    this.piCli = new PiCliProvider(config, buildExecutionEnv);
     this.cliTools = new CliToolsManager(() => this.executionEnv());
     this.telegramChannelPublisher = null;
   }
@@ -180,6 +228,7 @@ export class RuntimeController {
     if (backend === BACKEND_CODEX) return this.codexSdk;
     if (backend === BACKEND_OPENCODE_ACP) return this.opencodeAcp;
     if (backend === BACKEND_CLAUDE) return this.claudeSdk;
+    if (backend === BACKEND_PI) return this.piCli;
     return null;
   }
 
@@ -257,7 +306,10 @@ export class RuntimeController {
 
   buildPrompt(chatId, prompt, hostName, { roleName = '', memoryScope = '' } = {}) {
     const sections = [];
-    sections.push(`[REMOTE HOST]\nRunning through ${hostName}. Keep progress concise and action-oriented. Only emit rc-role-ops, rc-memory-ops, or rc-schedule-ops blocks when the user explicitly asks to change roles, memory, or schedules.`);
+    const autoMemoryPolicy = this.config.memoryAutoSave
+      ? 'You may emit rc-memory-ops even without an explicit remember request when recent dialogue reveals durable preferences, stable facts, long-lived constraints, owned resources, recurring workdirs, style choices, or project context that will matter in future turns. Prefer updating an existing memory instead of creating duplicates when the new fact clearly refines something already stored. Never store secrets, tokens, one-off task outputs, or transient debugging details.'
+      : 'Only emit rc-role-ops, rc-memory-ops, or rc-schedule-ops blocks when the user explicitly asks to change roles, memory, or schedules.';
+    sections.push(`[REMOTE HOST]\nRunning through ${hostName}. Keep progress concise and action-oriented. ${autoMemoryPolicy}`);
     const activeRole = roleName || this.activeRoleName(chatId);
     if (activeRole) {
       const roleContent = this.store.getRole(chatId, activeRole);
@@ -267,8 +319,13 @@ export class RuntimeController {
       const scope = memoryScope || this.defaultMemoryScope(chatId);
       const memories = this.store.listMemories(chatId, { scope, limit: Math.min(4, this.config.memoryMaxItems) });
       if (memories.length) {
-        sections.push('[MEMORY CONTEXT]\n' + memories.map((record) => `- ${record.kind}: ${String(record.content).replace(/\s+/g, ' ').trim()}`).join('\n'));
+        sections.push('[MEMORY CONTEXT]\n' + memories.map((record) => summarizeMemoryRecord(record)).join('\n'));
       }
+    }
+    const recentMessages = this.store.listConversationMessages?.(chatId, { limit: 6 }) || [];
+    if (recentMessages.length) {
+      const lines = recentMessages.map((entry) => summarizeConversationMessage(entry)).filter(Boolean);
+      if (lines.length) sections.push('[RECENT DIALOGUE]\n' + lines.join('\n'));
     }
     sections.push(`[CURRENT TASK]\n${prompt}`);
     return sections.join('\n\n');
@@ -327,14 +384,6 @@ export class RuntimeController {
         lines.push('', this.authRequiredText());
       }
       await sink.final(lines.join('\n'), { telegramControls: { chatId } });
-      return true;
-    }
-    if (spec.name === 'run') {
-      if (!rest) {
-        await sink.final('Usage\n/run <prompt>');
-        return true;
-      }
-      await this.runPrompt({ ...request, text: rest }, sink);
       return true;
     }
     if (spec.name === 'status') {
@@ -404,7 +453,7 @@ export class RuntimeController {
         await sink.final(this.buildRuntimePanelText(chatId, updated), { telegramControls: { chatId } });
         return true;
       }
-      await sink.final('Unsupported backend\nUsage\n/backend claude\n/backend codex\n/backend opencode-acp\n/backend default', { telegramControls: { chatId } });
+      await sink.final('Unsupported backend\nUsage\n/backend claude\n/backend codex\n/backend opencode-acp\n/backend pi\n/backend default', { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'memory') {
@@ -424,7 +473,23 @@ export class RuntimeController {
       return true;
     }
     if (spec.name === 'skill') {
-      await sink.final(this.handleSkillCommand());
+      await sink.final(this.handleSkillCommand(chatId, rest), {
+        telegramControls: {
+          chatId,
+          commandPanelAction: 'skill',
+          commandPanelPage: 0,
+        },
+      });
+      return true;
+    }
+    if (spec.name === 'mcp') {
+      await sink.final(this.handleMcpCommand(chatId, rest), {
+        telegramControls: {
+          chatId,
+          commandPanelAction: 'mcp',
+          commandPanelPage: 0,
+        },
+      });
       return true;
     }
     if (spec.name === 'setting') {
@@ -472,18 +537,117 @@ export class RuntimeController {
     return false;
   }
 
-  handleSkillCommand() {
-    const codexHome = process.env.CODEX_HOME?.trim() ? path.resolve(process.env.CODEX_HOME.trim()) : path.join(process.env.HOME || '', '.codex');
-    const skillsDir = path.join(codexHome, 'skills');
-    if (!fs.existsSync(skillsDir)) return 'No installed skills found';
-    const names = fs.readdirSync(skillsDir).filter((name) => !name.startsWith('.')).sort();
-    return names.length ? ['Installed Skills', ...names.map((name) => `- ${name}`)].join('\n') : 'No installed skills found';
+  handleSkillCommand(chatId, raw, options = {}) {
+    const text = String(raw || '').trim();
+    const skills = listSystemSkills();
+    const page = Math.max(0, Number(options.page) || 0);
+    const pageInfo = paginateItems(skills, page, 4);
+    if (!text || ['list', 'ls'].includes(text.toLowerCase())) {
+      if (!skills.length) return '技能\n当前没有可见 skill。';
+      const enabledCount = skills.filter((skill) => skill.enabled).length;
+      const disabledCount = skills.length - enabledCount;
+      return [
+        '技能',
+        `第 ${pageInfo.page + 1}/${pageInfo.totalPages} 页 · 启用 ${enabledCount} · 停用 ${disabledCount}`,
+        '可用下方按钮查看详情或直接启停。',
+        '',
+        ...pageInfo.items.map((skill, index) => `${pageInfo.page * pageInfo.pageSize + index + 1}. ${skill.enabled ? '🟢' : '⚪'} ${skill.name}\n${skill.backends.join('/')} · ${shortenHomePath(skill.path)}`),
+      ].join('\n');
+    }
+
+    const [sub, rest] = parseParts(text);
+    if (sub === 'show') {
+      if (!rest) return 'Usage\n/skill show <name>';
+      const lowered = rest.toLowerCase();
+      const matches = skills.filter((skill) => String(skill.name || '').toLowerCase() === lowered || String(skill.name || '').toLowerCase().includes(lowered));
+      if (!matches.length) return `Skill not found: ${rest}`;
+      if (matches.length > 1) return `Multiple skills match: ${rest}`;
+      const skill = matches[0];
+      return [
+        '🧩 技能详情',
+        `${skill.name}`,
+        `${skill.enabled ? '🟢 启用' : '⚪ 停用'} · ${skill.backends.join('/')}`,
+        `${shortenHomePath(skill.path)}`,
+      ].join('\n');
+    }
+
+    if (!['enable', 'disable'].includes(sub)) {
+      return '用法\n/skill list\n/skill show <name>\n/skill enable <name>\n/skill disable <name>';
+    }
+    if (!rest) {
+      return `用法\n/skill ${sub} <name>`;
+    }
+
+    try {
+      const updated = setSystemSkillEnabled(rest, sub === 'enable');
+      this.store.clearChatSession(chatId);
+      return [
+        `技能已${updated.enabled ? '启用' : '停用'}：${updated.name}`,
+        `后端：${updated.backends.join('/')}`,
+        '已清空当前 chat 会话，新任务会按新的 skill 状态启动。',
+      ].join('\n');
+    } catch (error) {
+      return `技能更新失败\n原因：${error?.message || String(error)}`;
+    }
+  }
+
+  handleMcpCommand(chatId, raw, options = {}) {
+    const text = String(raw || '').trim();
+    const servers = listSystemMcpServers();
+    const page = Math.max(0, Number(options.page) || 0);
+    const pageInfo = paginateItems(servers, page, 4);
+    if (!text || ['list', 'ls'].includes(text.toLowerCase())) {
+      if (!servers.length) return 'MCP\n当前没有可见 MCP Server。';
+      const enabledCount = servers.filter((server) => server.enabled).length;
+      const disabledCount = servers.length - enabledCount;
+      return [
+        'MCP',
+        `第 ${pageInfo.page + 1}/${pageInfo.totalPages} 页 · 启用 ${enabledCount} · 停用 ${disabledCount}`,
+        '可用下方按钮查看详情或直接启停。',
+        '',
+        ...pageInfo.items.map((server, index) => `${pageInfo.page * pageInfo.pageSize + index + 1}. ${server.enabled ? '🟢' : '⚪'} ${server.name}\n${server.backends.join('/')} · ${(server.command || []).join(' ')}`),
+      ].join('\n');
+    }
+
+    const [sub, rest] = parseParts(text);
+    if (sub === 'show') {
+      if (!rest) return 'Usage\n/mcp show <name>';
+      const lowered = rest.toLowerCase();
+      const matches = servers.filter((server) => String(server.name || '').toLowerCase() === lowered || String(server.name || '').toLowerCase().includes(lowered));
+      if (!matches.length) return `MCP Server 未找到：${rest}`;
+      if (matches.length > 1) return `MCP Server 匹配过多：${rest}`;
+      const server = matches[0];
+      return [
+        '🔌 MCP 详情',
+        `${server.name}`,
+        `${server.enabled ? '🟢 启用' : '⚪ 停用'} · ${server.backends.join('/')}`,
+        ...(server.command?.length ? [truncateText(server.command.join(' '), 180)] : []),
+      ].join('\n');
+    }
+
+    if (!['enable', 'disable'].includes(sub)) {
+      return '用法\n/mcp list\n/mcp show <name>\n/mcp enable <name>\n/mcp disable <name>';
+    }
+    if (!rest) return `用法\n/mcp ${sub} <name>`;
+
+    try {
+      const updated = setSystemMcpEnabled(rest, sub === 'enable');
+      this.store.clearChatSession(chatId);
+      return [
+        `MCP 已${updated.enabled ? '启用' : '停用'}：${updated.name}`,
+        `后端：${updated.backends.join('/')}`,
+        '已清空当前 chat 会话，新任务会按新的 MCP 状态启动。',
+      ].join('\n');
+    } catch (error) {
+      return `MCP 更新失败\n原因：${error?.message || String(error)}`;
+    }
   }
 
   handleSettingCommand() {
     const codexSdk = this.codexSdk.getDiagnostics();
     const claudeSdk = this.claudeSdk.getDiagnostics();
     const opencodeAcp = this.opencodeAcp.getDiagnostics();
+    const piCli = this.piCli.getDiagnostics();
     return [
       `default_backend: ${this.config.defaultBackend}`,
       `auth: ${this.isSecondFactorEnabled() ? `enabled (${formatSeconds(this.config.authTtlSeconds)})` : 'disabled'}`,
@@ -498,6 +662,7 @@ export class RuntimeController {
       `codex_command_prefix: ${redactedCommandText(this.config.codexCommandPrefix)}`,
       `claude_command_prefix: ${redactedCommandText(this.config.claudeCommandPrefix || 'claude')}`,
       `opencode_acp_command_prefix: ${redactedCommandText(this.config.opencodeCommandPrefix)}`,
+      `pi_command_prefix: ${redactedCommandText(this.config.piCommandPrefix || 'pi --mode json')}`,
       `codex_sdk: ${codexSdk.initialized ? 'initialized' : 'lazy'}`,
       `codex_model_passthrough: ${codexSdk.modelPassthrough ? 'enabled' : 'disabled'}`,
       `codex_auth: ${codexSdk.authSource}`,
@@ -516,6 +681,9 @@ export class RuntimeController {
       ...(opencodeAcp.lastResumeSkipReason ? [`opencode_last_resume_skip: ${opencodeAcp.lastResumeSkipReason}`] : []),
       ...(opencodeAcp.lastPermissionDecision ? [`opencode_last_permission: ${opencodeAcp.lastPermissionDecision}`] : []),
       ...(opencodeAcp.lastStopReason ? [`opencode_last_stop_reason: ${opencodeAcp.lastStopReason}`] : []),
+      `pi_cli: ${piCli.cliPath || '(not found)'}`,
+      `pi_version: ${piCli.cliVersion || 'unknown'}`,
+      ...(piCli.lastInitError ? [`pi_last_init_error: ${piCli.lastInitError}`] : []),
     ].join('\n');
   }
 
@@ -576,7 +744,10 @@ export class RuntimeController {
       return this.buildCliPanelText(chatId, { checkLatest: true, force: true });
     }
     if (normalized === 'skill') {
-      return this.handleSkillCommand();
+      return this.handleSkillCommand(chatId, '');
+    }
+    if (normalized === 'mcp') {
+      return this.handleMcpCommand(chatId, '');
     }
     if (normalized === 'role') {
       return this.handleRoleCommand(chatId, '');
@@ -633,20 +804,29 @@ export class RuntimeController {
     const normalized = normalizeBackendAlias(value);
     if (normalized === 'default') {
       this.store.clearChatCommandPrefix(chatId);
+      this.store.clearChatSession(chatId);
       const backend = this.effectiveBackend(chatId);
-      return `已恢复默认后端: ${backendLabel(backend)}`;
+      return `已恢复默认后端: ${backendLabel(backend)}（已清空旧会话，后续将新建该后端会话）`;
     }
     if (normalized === BACKEND_CODEX) {
       this.store.setChatCommandPrefix(chatId, this.config.codexCommandPrefix);
-      return `已切到 ${backendLabel(BACKEND_CODEX)}`;
+      this.store.clearChatSession(chatId);
+      return `已切到 ${backendLabel(BACKEND_CODEX)}（已清空旧会话）`;
     }
     if (normalized === BACKEND_OPENCODE_ACP) {
       this.store.setChatCommandPrefix(chatId, this.config.opencodeCommandPrefix);
-      return `已切到 ${backendLabel(BACKEND_OPENCODE_ACP)}`;
+      this.store.clearChatSession(chatId);
+      return `已切到 ${backendLabel(BACKEND_OPENCODE_ACP)}（已清空旧会话）`;
     }
     if (normalized === BACKEND_CLAUDE) {
       this.store.setChatCommandPrefix(chatId, this.config.claudeCommandPrefix || 'claude');
-      return `已切到 ${backendLabel(BACKEND_CLAUDE)}`;
+      this.store.clearChatSession(chatId);
+      return `已切到 ${backendLabel(BACKEND_CLAUDE)}（已清空旧会话）`;
+    }
+    if (normalized === BACKEND_PI) {
+      this.store.setChatCommandPrefix(chatId, this.config.piCommandPrefix || 'pi --mode json');
+      this.store.clearChatSession(chatId);
+      return `已切到 ${backendLabel(BACKEND_PI)}（已清空旧会话）`;
     }
     return '';
   }
@@ -981,6 +1161,7 @@ export class RuntimeController {
     });
 
     try {
+      this.store.appendConversationMessage?.(chatId, 'user', request.text, { maxItems: 24 });
       if (!suppressProgress) {
         await sink.progress({ status: 'Running', marker: 'thinking', text: 'thinking...', elapsedSeconds: 0 });
       }
@@ -1048,6 +1229,7 @@ export class RuntimeController {
         console.info(`[runtime] applied ops host=${taskHost} chat=${chatId} role=${opsResult.counts.role} memory=${opsResult.counts.memory} schedule=${opsResult.counts.schedule}`);
       }
       console.info(`[runtime] task final backend=${backend} host=${taskHost} chat=${chatId} session=${sessionId || '-'} preview=${truncateText(preview, 160)}`);
+      this.store.appendConversationMessage?.(chatId, 'assistant', preview, { maxItems: 24 });
       await sink.final({
         status: 'Done',
         marker: previewInfo.marker,

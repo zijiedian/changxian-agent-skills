@@ -35,5 +35,5 @@ test('buildRuntimeControlState reports backend-specific permission labels', () =
   assert.equal(buildRuntimeControlState('codex', 'codex -a on-request --search exec -s workspace-write --skip-git-repo-check').permissionLabel, '标准');
   assert.equal(buildRuntimeControlState('claude', 'claude --permission-mode plan').permissionLabel, 'Plan');
   assert.equal(buildRuntimeControlState('opencode-acp', 'opencode acp').permissionLabel, '后端控制');
+  assert.equal(buildRuntimeControlState('pi', 'pi --mode json').permissionLabel, '后端控制');
 });
-

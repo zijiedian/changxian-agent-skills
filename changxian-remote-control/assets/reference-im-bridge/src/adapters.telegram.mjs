@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { COMMAND_SPECS } from './commands.mjs';
-import { renderTelegramPayload } from './render.telegram.mjs';
+import { coerceTelegramHtml, renderTelegramPayload } from './render.telegram.mjs';
 import {
   buildPermissionPromptText,
   createTelegramPermissionRegistry,
@@ -10,9 +10,13 @@ import {
 import { createTelegramChannelPublisher } from './telegram-channel-publisher.mjs';
 import { buildRuntimeControlKeyboard } from './telegram-controls.mjs';
 import { buildCommandPanelKeyboard } from './telegram-command-panels.mjs';
+import { buildPreviewSummaryMarkdown, buildStructuredPreview, previewHasProgressDetails, truncateText } from './utils.mjs';
 
 const TELEGRAM_EDIT_RETRY_DELAY_MS = 800;
 const TELEGRAM_PROGRESS_EDIT_INTERVAL_MS = 1000;
+const TELEGRAM_PROGRESS_APPEND_MARKDOWN_LIMIT = 2600;
+const TELEGRAM_STANDALONE_FINAL_MIN_ELAPSED_SECONDS = 8;
+const TELEGRAM_STANDALONE_FINAL_MIN_PROGRESS_UPDATES = 3;
 const TELEGRAM_COMMAND_SYNC_TTL_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_COMMAND_SYNC_RETRY_MS = 60 * 1000;
 
@@ -66,14 +70,140 @@ function buildPermissionKeyboard(token, request) {
 }
 
 function mergeInlineKeyboards(...keyboards) {
-  const merged = new InlineKeyboard();
+  const mergedRows = [];
   for (const keyboard of keyboards) {
     const rows = Array.isArray(keyboard?.inline_keyboard) ? keyboard.inline_keyboard : [];
     for (const row of rows) {
-      merged.inline_keyboard.push(row);
+      if (Array.isArray(row) && row.length) mergedRows.push(row);
     }
   }
-  return merged.inline_keyboard.length ? merged : undefined;
+  if (!mergedRows.length) return undefined;
+  const merged = new InlineKeyboard();
+  merged.inline_keyboard = mergedRows;
+  return merged;
+}
+
+export function shouldSendStandaloneFinalTelegramMessage({
+  hasProgressMessage = false,
+  pageCount = 1,
+  hasImages = false,
+  hasReplyMarkup = false,
+  elapsedSeconds = 0,
+  progressUpdateCount = 0,
+} = {}) {
+  if (!hasProgressMessage) return false;
+  if (Number(pageCount) > 1) return true;
+  if (hasImages) return true;
+  if (hasReplyMarkup) return true;
+  if (Number(elapsedSeconds) >= TELEGRAM_STANDALONE_FINAL_MIN_ELAPSED_SECONDS) return true;
+  if (Number(progressUpdateCount) >= TELEGRAM_STANDALONE_FINAL_MIN_PROGRESS_UPDATES) return true;
+  return false;
+}
+
+function progressHeading(preview) {
+  if (preview?.phase === 'thinking') return '正在推理';
+  if (preview?.phase === 'diff') return '正在整理变更';
+  if (preview?.phase === 'research') return '正在检索资料';
+  return '';
+}
+
+function normalizeProgressText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function buildTelegramProgressEntry(payload) {
+  const marker = String(payload?.marker || 'thinking').trim().toLowerCase();
+  const preview = payload?.preview && typeof payload.preview === 'object' && !Array.isArray(payload.preview)
+    ? payload.preview
+    : buildStructuredPreview(String(payload?.text || ''), { status: 'Running', marker });
+  const previewText = String(payload?.text || preview.summary || preview.content || '').trim();
+  const previewLower = previewText.toLowerCase();
+  const isPlaceholder = marker === 'thinking'
+    && (!previewHasProgressDetails(preview))
+    && (!previewText || previewLower === 'thinking...' || previewLower === 'thinking');
+
+  if (isPlaceholder) {
+    const rendered = renderTelegramPayload({
+      status: 'Running',
+      marker,
+      text: previewText || 'thinking...',
+      preview,
+      elapsedSeconds: Number(payload?.elapsedSeconds) || 0,
+    });
+    return {
+      kind: 'placeholder',
+      html: rendered.html,
+      marker,
+      phase: String(preview?.phase || marker).trim().toLowerCase(),
+      summary: 'thinking...',
+      markdown: '',
+    };
+  }
+
+  const heading = progressHeading(preview);
+  const markdown = buildPreviewSummaryMarkdown(preview, {
+    heading,
+    maxHighlights: 1,
+    maxChecks: 1,
+    maxFiles: 2,
+    maxNotes: 0,
+    includeDiffHint: false,
+  }).trim() || [heading ? `**${heading}**` : '', truncateText(previewText, 180)].filter(Boolean).join('\n').trim();
+
+  return {
+    kind: 'entry',
+    html: coerceTelegramHtml(markdown || truncateText(previewText, 180) || '处理中'),
+    marker,
+    phase: String(preview?.phase || marker).trim().toLowerCase(),
+    summary: String(preview?.summary || truncateText(previewText, 120) || marker || '处理中').trim(),
+    markdown,
+  };
+}
+
+function shouldReplaceProgressEntry(lastEntry, nextEntry) {
+  if (!lastEntry || !nextEntry) return false;
+  if (lastEntry.marker !== nextEntry.marker || lastEntry.phase !== nextEntry.phase) return false;
+
+  const previous = normalizeProgressText(lastEntry.summary);
+  const next = normalizeProgressText(nextEntry.summary);
+  if (!previous || !next) return false;
+  if (previous === next) return true;
+  if (previous.startsWith(next) || next.startsWith(previous)) return true;
+  if (nextEntry.marker === 'assistant' || nextEntry.marker === 'thinking') return true;
+  return false;
+}
+
+function buildAppendedProgressHtml(entries) {
+  const parts = (Array.isArray(entries) ? entries : [])
+    .map((entry) => String(entry?.markdown || '').trim())
+    .filter(Boolean);
+  if (!parts.length) return '<i>Thinking...</i>';
+
+  let visible = parts.slice();
+  while (visible.length > 1 && visible.join('\n\n---\n\n').length > TELEGRAM_PROGRESS_APPEND_MARKDOWN_LIMIT) {
+    visible = visible.slice(1);
+  }
+
+  let markdown = visible.join('\n\n---\n\n');
+  if (visible.length < parts.length) markdown = `...\n\n---\n\n${markdown}`;
+  return coerceTelegramHtml(markdown);
+}
+
+async function deleteTelegramMessage({ remove, logPrefix }) {
+  try {
+    await remove();
+    return { ok: true };
+  } catch (error) {
+    const reason = telegramErrorText(error);
+    if (/message to delete not found|message can't be deleted/i.test(reason)) {
+      return { ok: true, skipped: true };
+    }
+    console.warn(logPrefix, reason);
+    return { ok: false, reason };
+  }
 }
 
 async function editTelegramMessage({
@@ -210,16 +340,39 @@ export async function startTelegramAdapter(config, controller) {
     return keyboard;
   }
 
-  function rememberPagination(chatId, pages) {
+  function rememberPagination(chatId, pages, options = {}) {
     prunePaginationSessions();
     if (!Array.isArray(pages) || pages.length <= 1) return null;
     const token = crypto.randomBytes(6).toString('base64url');
     paginationSessions.set(token, {
       chatId: String(chatId),
       pages: pages.slice(),
+      commandPanelAction: String(options.commandPanelAction || '').trim().toLowerCase(),
+      commandPanelPage: Math.max(0, Number(options.commandPanelPage) || 0),
+      includeRuntimeControls: options.includeRuntimeControls === true,
+      controlsChatId: String(options.controlsChatId || chatId),
       updatedAt: Date.now(),
     });
     return token;
+  }
+
+  function buildStoredReplyMarkup(token, pageIndex, session, controller) {
+    const commandPanel = session?.commandPanelAction
+      ? buildCommandPanelKeyboard(
+        controller,
+        String(session.controlsChatId || session.chatId || ''),
+        session.commandPanelAction,
+        { page: Math.max(0, Number(session.commandPanelPage) || 0) },
+      )
+      : undefined;
+    const controls = session?.includeRuntimeControls
+      ? buildRuntimeControlKeyboard(controller, String(session.controlsChatId || session.chatId || ''))
+      : undefined;
+    return mergeInlineKeyboards(
+      buildPaginationKeyboard(token, pageIndex, session.pages.length),
+      commandPanel,
+      controls,
+    );
   }
 
   bot.callbackQuery(/^rcpage:([^:]+):(\d+)$/, async (ctx) => {
@@ -238,7 +391,7 @@ export async function startTelegramAdapter(config, controller) {
     const index = Math.max(0, Math.min(requestedIndex, session.pages.length - 1));
     session.updatedAt = Date.now();
     const pageHtml = session.pages[index] || '<i>暂无输出</i>';
-    const replyMarkup = buildPaginationKeyboard(token, index, session.pages.length);
+    const replyMarkup = buildStoredReplyMarkup(token, index, session, controller);
     const result = await editTelegramMessage({
       edit: () => ctx.editMessageText(pageHtml, {
         parse_mode: 'HTML',
@@ -272,6 +425,15 @@ export async function startTelegramAdapter(config, controller) {
     session.updatedAt = Date.now();
     await ctx.answerCallbackQuery({
       text: `第 ${Math.max(1, index + 1)}/${session.pages.length} 页`,
+      show_alert: false,
+    }).catch(() => {});
+  });
+
+  bot.callbackQuery(/^rcnoop:(skill|mcp):(\d+)$/, async (ctx) => {
+    const kind = String(ctx.match?.[1] || '');
+    const index = Number.parseInt(String(ctx.match?.[2] || '0'), 10);
+    await ctx.answerCallbackQuery({
+      text: `${kind.toUpperCase()} 第 ${Math.max(1, index + 1)} 页`,
       show_alert: false,
     }).catch(() => {});
   });
@@ -323,7 +485,7 @@ export async function startTelegramAdapter(config, controller) {
       text = controller.runCliUpgrade(chatId);
     } else if (kind === 'cmd') {
       text = await controller.handleQuickCommand(value, request);
-      commandPanel = buildCommandPanelKeyboard(controller, chatId, value);
+      commandPanel = buildCommandPanelKeyboard(controller, chatId, value, { page: 0 });
     } else {
       if (kind === 'backend') {
         notice = controller.applyBackendSelection(chatId, value) || '无法切换后端。';
@@ -346,7 +508,12 @@ export async function startTelegramAdapter(config, controller) {
     });
     const keyboard = buildRuntimeControlKeyboard(controller, chatId);
     const pages = rendered.pages || [rendered.html];
-    const token = rememberPagination(chatId, pages);
+    const token = rememberPagination(chatId, pages, {
+      commandPanelAction: kind === 'cmd' ? value : '',
+      commandPanelPage: 0,
+      includeRuntimeControls: true,
+      controlsChatId: chatId,
+    });
     const replyMarkup = mergeInlineKeyboards(
       token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
       commandPanel,
@@ -372,7 +539,7 @@ export async function startTelegramAdapter(config, controller) {
     }
   });
 
-  bot.callbackQuery(/^rcctl:(schedule|role|channel|memory):([^:]+):(.+)$/, async (ctx) => {
+  bot.callbackQuery(/^rcctl:(schedule|role|channel|memory|skill|mcp):([^:]+):(.+)$/, async (ctx) => {
     const kind = String(ctx.match?.[1] || '');
     const action = String(ctx.match?.[2] || '');
     const target = String(ctx.match?.[3] || '');
@@ -405,6 +572,30 @@ export async function startTelegramAdapter(config, controller) {
       if (action === 'show' || action === 'pin' || action === 'delete') {
         text = controller.handleMemoryPanelAction(chatId, action, target);
       }
+    } else if (kind === 'skill') {
+      const [pageRaw, targetNameRaw] = String(target || '').split('|', 2);
+      const panelPage = Math.max(0, Number.parseInt(pageRaw || '0', 10) || 0);
+      const targetName = targetNameRaw || pageRaw;
+      if (action === 'show') text = controller.handleSkillCommand(chatId, `show ${targetName}`);
+      else if (action === 'toggle') {
+        const detail = controller.handleSkillCommand(chatId, `show ${targetName}`);
+        const enabled = /状态：启用/.test(detail);
+        text = `${controller.handleSkillCommand(chatId, `${enabled ? 'disable' : 'enable'} ${targetName}`)}\n\n${controller.handleSkillCommand(chatId, '', { page: panelPage })}`;
+      } else if (action === 'page') {
+        text = controller.handleSkillCommand(chatId, '', { page: panelPage });
+      }
+    } else if (kind === 'mcp') {
+      const [pageRaw, targetNameRaw] = String(target || '').split('|', 2);
+      const panelPage = Math.max(0, Number.parseInt(pageRaw || '0', 10) || 0);
+      const targetName = targetNameRaw || pageRaw;
+      if (action === 'show') text = controller.handleMcpCommand(chatId, `show ${targetName}`);
+      else if (action === 'toggle') {
+        const detail = controller.handleMcpCommand(chatId, `show ${targetName}`);
+        const enabled = /状态：启用/.test(detail);
+        text = `${controller.handleMcpCommand(chatId, `${enabled ? 'disable' : 'enable'} ${targetName}`)}\n\n${controller.handleMcpCommand(chatId, '', { page: panelPage })}`;
+      } else if (action === 'page') {
+        text = controller.handleMcpCommand(chatId, '', { page: panelPage });
+      }
     }
 
     if (!text) {
@@ -414,8 +605,19 @@ export async function startTelegramAdapter(config, controller) {
 
     const rendered = renderTelegramPayload({ status: 'Done', text });
     const pages = rendered.pages || [rendered.html];
-    const token = rememberPagination(chatId, pages);
-    const commandPanel = buildCommandPanelKeyboard(controller, chatId, kind);
+    const token = rememberPagination(chatId, pages, {
+      commandPanelAction: kind,
+      commandPanelPage: kind === 'skill' || kind === 'mcp'
+        ? Math.max(0, Number.parseInt(String(target || '').split('|', 1)[0] || '0', 10) || 0)
+        : 0,
+      includeRuntimeControls: true,
+      controlsChatId: chatId,
+    });
+    const commandPanel = buildCommandPanelKeyboard(controller, chatId, kind, {
+      page: kind === 'skill' || kind === 'mcp'
+        ? Math.max(0, Number.parseInt(String(target || '').split('|', 1)[0] || '0', 10) || 0)
+        : 0,
+    });
     const keyboard = buildRuntimeControlKeyboard(controller, chatId);
     const replyMarkup = mergeInlineKeyboards(
       token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
@@ -502,42 +704,63 @@ export async function startTelegramAdapter(config, controller) {
   };
 }
 
-function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, permissionRegistry, controller) {
+export function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, permissionRegistry, controller) {
   let message = null;
   const sentImages = new Set();
   let editBackoffUntilMs = 0;
   let lastProgressEditAtMs = 0;
+  let progressUpdateCount = 0;
+  const progressEntries = [];
 
-  async function upsertMessage(html, replyMarkup = undefined, { mode = 'final' } = {}) {
-    const now = Date.now();
-    if (mode === 'progress') {
-      if (now < editBackoffUntilMs) return;
-      if (message && now - lastProgressEditAtMs < TELEGRAM_PROGRESS_EDIT_INTERVAL_MS) return;
-    }
+  async function sendMessage(html, replyMarkup = undefined) {
+    message = await ctx.reply(html, {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      reply_markup: replyMarkup,
+    });
+    return message;
+  }
+
+  async function editCurrentMessage(
+    html,
+    replyMarkup = undefined,
+    { allowFallback = true, logPrefix = '[telegram] editMessageText failed' } = {},
+  ) {
     if (!message) {
-      message = await ctx.reply(html, {
-        parse_mode: 'HTML',
-        link_preview_options: { is_disabled: true },
-        reply_markup: replyMarkup,
-      });
-      if (mode === 'progress') lastProgressEditAtMs = Date.now();
-      return;
+      await sendMessage(html, replyMarkup);
+      return { ok: true, mode: 'sent', reason: '' };
     }
-    const result = await editTelegramMessage({
+    return editTelegramMessage({
       edit: () => ctx.api.editMessageText(ctx.chat.id, message.message_id, html, {
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
         reply_markup: replyMarkup,
       }),
-      sendFallback: mode === 'final'
+      sendFallback: allowFallback
         ? async () => {
-          message = await ctx.reply(html, {
-            parse_mode: 'HTML',
-            link_preview_options: { is_disabled: true },
-            reply_markup: replyMarkup,
-          });
+          await sendMessage(html, replyMarkup);
         }
         : null,
+      logPrefix,
+    });
+  }
+
+  async function deleteMessageById(messageId) {
+    if (!messageId) return;
+    await deleteTelegramMessage({
+      remove: () => ctx.api.deleteMessage(ctx.chat.id, messageId),
+      logPrefix: '[telegram] delete progress message failed',
+    });
+  }
+
+  async function upsertMessage(html, replyMarkup = undefined, { mode = 'final', force = false } = {}) {
+    const now = Date.now();
+    if (mode === 'progress') {
+      if (now < editBackoffUntilMs) return;
+      if (!force && message && now - lastProgressEditAtMs < TELEGRAM_PROGRESS_EDIT_INTERVAL_MS) return;
+    }
+    const result = await editCurrentMessage(html, replyMarkup, {
+      allowFallback: mode === 'final',
       logPrefix: '[telegram] editMessageText failed',
     });
     if (result.mode === 'rate_limited' && result.retryAfterSeconds) {
@@ -564,29 +787,71 @@ function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, pe
 
   return {
     async progress(payload) {
-      const rendered = renderTelegramPayload(payload);
-      const pages = rendered.pages || [rendered.html];
-      const token = rememberPagination(String(ctx.chat.id), pages);
+      const entry = buildTelegramProgressEntry(payload);
+      if (entry.kind === 'placeholder') {
+        if (!progressEntries.length) {
+          await upsertMessage(entry.html, undefined, { mode: 'progress' });
+          if (message) progressUpdateCount += 1;
+        }
+        return;
+      }
+
+      const lastEntry = progressEntries[progressEntries.length - 1] || null;
+      if (shouldReplaceProgressEntry(lastEntry, entry)) {
+        progressEntries[progressEntries.length - 1] = entry;
+      } else {
+        progressEntries.push(entry);
+      }
+
       await upsertMessage(
-        pages[0] || rendered.html,
-        token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
-        { mode: 'progress' },
+        buildAppendedProgressHtml(progressEntries),
+        undefined,
+        { mode: 'progress', force: true },
       );
+      if (message) progressUpdateCount += 1;
     },
     async final(payload, options = {}) {
       const rendered = renderTelegramPayload(payload);
       const pages = rendered.pages || [rendered.html];
-      const token = rememberPagination(String(ctx.chat.id), pages);
+      const token = rememberPagination(String(ctx.chat.id), pages, {
+        commandPanelAction: String(options?.telegramControls?.commandPanelAction || '').trim().toLowerCase(),
+        commandPanelPage: Math.max(0, Number(options?.telegramControls?.commandPanelPage) || 0),
+        includeRuntimeControls: Boolean(options?.telegramControls),
+        controlsChatId: String(options?.telegramControls?.chatId || ctx.chat.id),
+      });
+      const commandPanel = options?.telegramControls?.commandPanelAction
+        ? buildCommandPanelKeyboard(
+          controller,
+          String(options.telegramControls.chatId || ctx.chat.id),
+          String(options.telegramControls.commandPanelAction),
+          { page: Math.max(0, Number(options?.telegramControls?.commandPanelPage) || 0) },
+        )
+        : undefined;
       const controls = options?.telegramControls ? buildRuntimeControlKeyboard(controller, String(options.telegramControls.chatId || ctx.chat.id)) : undefined;
       const replyMarkup = mergeInlineKeyboards(
         token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
+        commandPanel,
         controls,
       );
-      await upsertMessage(
-        pages[0] || rendered.html,
-        replyMarkup,
-        { mode: 'final' },
-      );
+      const shouldSendStandalone = shouldSendStandaloneFinalTelegramMessage({
+        hasProgressMessage: Boolean(message) && progressUpdateCount > 0,
+        pageCount: pages.length,
+        hasImages: Array.isArray(rendered.images) && rendered.images.length > 0,
+        hasReplyMarkup: Boolean(replyMarkup?.inline_keyboard?.length),
+        elapsedSeconds: Number(payload?.elapsedSeconds) || 0,
+        progressUpdateCount,
+      });
+      if (shouldSendStandalone) {
+        const progressMessageId = message?.message_id;
+        await sendMessage(pages[0] || rendered.html, replyMarkup);
+        await deleteMessageById(progressMessageId);
+      } else {
+        await upsertMessage(
+          pages[0] || rendered.html,
+          replyMarkup,
+          { mode: 'final' },
+        );
+      }
       await sendImages(rendered.images);
     },
     async requestPermission(request, { signal } = {}) {
@@ -613,7 +878,7 @@ function createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, pe
   };
 }
 
-function createTelegramPushSink(bot, binding, rememberPagination, buildPaginationKeyboard) {
+export function createTelegramPushSink(bot, binding, rememberPagination, buildPaginationKeyboard) {
   const chatId = typeof binding === 'object'
     ? String(binding.externalChatId || binding.chatId || '')
     : String(binding || '');
@@ -621,6 +886,50 @@ function createTelegramPushSink(bot, binding, rememberPagination, buildPaginatio
   const sentImages = new Set();
   let editBackoffUntilMs = 0;
   let lastProgressEditAtMs = 0;
+  let progressUpdateCount = 0;
+
+  async function sendMessage(html, replyMarkup = undefined) {
+    if (!chatId) return null;
+    message = await bot.api.sendMessage(chatId, html, {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      reply_markup: replyMarkup,
+    });
+    return message;
+  }
+
+  async function editCurrentMessage(
+    html,
+    replyMarkup = undefined,
+    { allowFallback = true, logPrefix = '[telegram] push editMessageText failed' } = {},
+  ) {
+    if (!chatId) return { ok: false, mode: 'skipped', reason: 'missing chat id' };
+    if (!message) {
+      await sendMessage(html, replyMarkup);
+      return { ok: true, mode: 'sent', reason: '' };
+    }
+    return editTelegramMessage({
+      edit: () => bot.api.editMessageText(chatId, message.message_id, html, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+        reply_markup: replyMarkup,
+      }),
+      sendFallback: allowFallback
+        ? async () => {
+          await sendMessage(html, replyMarkup);
+        }
+        : null,
+      logPrefix,
+    });
+  }
+
+  async function deleteMessageById(messageId) {
+    if (!chatId || !messageId) return;
+    await deleteTelegramMessage({
+      remove: () => bot.api.deleteMessage(chatId, messageId),
+      logPrefix: '[telegram] push delete progress message failed',
+    });
+  }
 
   async function upsertMessage(html, replyMarkup = undefined, { mode = 'final' } = {}) {
     if (!chatId) return;
@@ -629,30 +938,8 @@ function createTelegramPushSink(bot, binding, rememberPagination, buildPaginatio
       if (now < editBackoffUntilMs) return;
       if (message && now - lastProgressEditAtMs < TELEGRAM_PROGRESS_EDIT_INTERVAL_MS) return;
     }
-    if (!message) {
-      message = await bot.api.sendMessage(chatId, html, {
-        parse_mode: 'HTML',
-        link_preview_options: { is_disabled: true },
-        reply_markup: replyMarkup,
-      });
-      if (mode === 'progress') lastProgressEditAtMs = Date.now();
-      return;
-    }
-    const result = await editTelegramMessage({
-      edit: () => bot.api.editMessageText(chatId, message.message_id, html, {
-        parse_mode: 'HTML',
-        link_preview_options: { is_disabled: true },
-        reply_markup: replyMarkup,
-      }),
-      sendFallback: mode === 'final'
-        ? async () => {
-          message = await bot.api.sendMessage(chatId, html, {
-            parse_mode: 'HTML',
-            link_preview_options: { is_disabled: true },
-            reply_markup: replyMarkup,
-          });
-        }
-        : null,
+    const result = await editCurrentMessage(html, replyMarkup, {
+      allowFallback: mode === 'final',
       logPrefix: '[telegram] push editMessageText failed',
     });
     if (result.mode === 'rate_limited' && result.retryAfterSeconds) {
@@ -688,16 +975,32 @@ function createTelegramPushSink(bot, binding, rememberPagination, buildPaginatio
         token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
         { mode: 'progress' },
       );
+      if (message) progressUpdateCount += 1;
     },
     async final(payload) {
       const rendered = renderTelegramPayload(payload);
       const pages = rendered.pages || [rendered.html];
       const token = rememberPagination(chatId, pages);
-      await upsertMessage(
-        pages[0] || rendered.html,
-        token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
-        { mode: 'final' },
-      );
+      const replyMarkup = token ? buildPaginationKeyboard(token, 0, pages.length) : undefined;
+      const shouldSendStandalone = shouldSendStandaloneFinalTelegramMessage({
+        hasProgressMessage: Boolean(message) && progressUpdateCount > 0,
+        pageCount: pages.length,
+        hasImages: Array.isArray(rendered.images) && rendered.images.length > 0,
+        hasReplyMarkup: Boolean(replyMarkup?.inline_keyboard?.length),
+        elapsedSeconds: Number(payload?.elapsedSeconds) || 0,
+        progressUpdateCount,
+      });
+      if (shouldSendStandalone) {
+        const progressMessageId = message?.message_id;
+        await sendMessage(pages[0] || rendered.html, replyMarkup);
+        await deleteMessageById(progressMessageId);
+      } else {
+        await upsertMessage(
+          pages[0] || rendered.html,
+          replyMarkup,
+          { mode: 'final' },
+        );
+      }
       await sendImages(rendered.images);
     },
   };

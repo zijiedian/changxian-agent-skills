@@ -46,6 +46,7 @@ function resolvePreviewModel(payload) {
 }
 
 function progressHeading(preview) {
+  if (preview.phase === 'thinking') return '正在推理';
   if (preview.phase === 'diff') return '正在整理变更';
   if (preview.phase === 'research') return '正在检索资料';
   return '';

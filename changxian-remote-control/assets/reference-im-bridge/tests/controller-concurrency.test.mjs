@@ -22,6 +22,7 @@ function createConfig() {
 function createStore() {
   return {
     getChatCommandPrefix() { return ''; },
+    setChatCommandPrefix() {},
     getChatWorkdir() { return ''; },
     setChatWorkdir() {},
     getActiveRole() { return ''; },
@@ -30,6 +31,7 @@ function createStore() {
     ensureDefaultRoles() {},
     getChatSession() { return ''; },
     setChatSession() {},
+    clearChatSession() {},
     getJobSession() { return ''; },
     setJobSession() {},
     saveHostBinding() {},
@@ -171,4 +173,15 @@ test('runScheduledJob remains blocked by another scheduler task in the same chat
   assert.equal(result.skipped, true);
   assert.equal(result.summary, 'chat busy');
   assert.equal(sink.finalCalls[0], '当前会话已有任务在运行，请稍后重试。');
+});
+
+test('switching backend clears incompatible saved chat sessions', () => {
+  let cleared = 0;
+  const store = createStore();
+  store.clearChatSession = () => { cleared += 1; };
+  const controller = new RuntimeController(createConfig(), store);
+
+  const message = controller.applyBackendSelection('chat-1', 'pi');
+  assert.match(message, /Pi CLI/);
+  assert.equal(cleared, 1);
 });

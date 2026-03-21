@@ -1478,6 +1478,9 @@ function normalizeRunningTraceMarkdown(text) {
   value = value
     .replace(/(^|\n)thinking\.\.\.(?=\n|$)/gi, '$1思考中...')
     .replace(/(^|\n)thinking(?=\n|$)/gi, '$1**思考**')
+    .replace(/(^|\n)reasoning(?=\n|$)/gi, '$1**推理**')
+    .replace(/(^|\n)final_answer(?=\n|$)/gi, '$1**输出**')
+    .replace(/(^|\n)text(?=\n|$)/gi, '$1**输出**')
     .replace(/(^|\n)(assistant|codex)(?=\n|$)/gi, '$1**输出**')
     .replace(/(^|\n)exec(?=\n|$)/gi, '$1');
   value = normalizePreviewContent(value);

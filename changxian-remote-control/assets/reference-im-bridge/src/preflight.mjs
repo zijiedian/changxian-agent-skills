@@ -6,11 +6,12 @@ import {
   BACKEND_CLAUDE,
   BACKEND_CODEX,
   BACKEND_OPENCODE_ACP,
+  BACKEND_PI,
   detectBackend,
 } from './backend-detection.mjs';
 import { redactedCommandText, splitShellArgs } from './utils.mjs';
 
-const REMOTE_CONTROL_ENV_RE = /^(?:TG_|WECOM_|RC_AUTH_|RC_CODEX_|RC_CLAUDE_|RC_OPENCODE_|RC_DEFAULT_BACKEND$|RC_HOST$|RC_PORT$|RC_ENABLE_|RC_MEMORY_|RC_SCHEDULER_|RC_REPLY_|RC_MAX_|RC_DEFAULT_TIMEZONE$|OPENCODE_ACP_)/;
+const REMOTE_CONTROL_ENV_RE = /^(?:TG_|WECOM_|RC_AUTH_|RC_CODEX_|RC_CLAUDE_|RC_OPENCODE_|RC_PI_|RC_DEFAULT_BACKEND$|RC_HOST$|RC_PORT$|RC_ENABLE_|RC_MEMORY_|RC_SCHEDULER_|RC_REPLY_|RC_MAX_|RC_DEFAULT_TIMEZONE$|OPENCODE_ACP_)/;
 const VERSION_PROBE_ARGS = [['--version'], ['version'], ['-v']];
 const CODEX_AUTH_PROBE_ARGS = [['login', 'status'], ['auth', 'status']];
 const CLAUDE_AUTH_PROBE_ARGS = [['auth', 'status']];
@@ -61,6 +62,12 @@ function configuredClaudeExecutable() {
   return fs.existsSync(value) ? path.resolve(value) : '';
 }
 
+function configuredPiExecutable() {
+  const value = String(process.env.RC_PI_EXECUTABLE || '').trim();
+  if (!value) return '';
+  return fs.existsSync(value) ? path.resolve(value) : '';
+}
+
 export function buildExecutionEnv(baseEnv = process.env, overrides = {}) {
   const env = { ...baseEnv };
   for (const key of Object.keys(env)) {
@@ -93,13 +100,15 @@ export function runCommandPreflight(options = {}) {
   pushCheck('workdir', fs.existsSync(workdir) && fs.statSync(workdir).isDirectory(), workdir);
   pushCheck(
     'backend',
-    backend === BACKEND_CODEX || backend === BACKEND_CLAUDE || backend === BACKEND_OPENCODE_ACP,
+    backend === BACKEND_CODEX || backend === BACKEND_CLAUDE || backend === BACKEND_OPENCODE_ACP || backend === BACKEND_PI,
     backend === BACKEND_CODEX
       ? 'codex sdk'
       : backend === BACKEND_CLAUDE
         ? 'claude sdk'
         : backend === BACKEND_OPENCODE_ACP
           ? 'opencode acp'
+          : backend === BACKEND_PI
+            ? 'pi cli'
           : 'unsupported command prefix',
   );
 
@@ -108,7 +117,7 @@ export function runCommandPreflight(options = {}) {
   }
 
   const resolvedPath = executable
-    ? which(executable, shell, env) || (backend === BACKEND_CLAUDE ? configuredClaudeExecutable() : '')
+    ? which(executable, shell, env) || (backend === BACKEND_CLAUDE ? configuredClaudeExecutable() : backend === BACKEND_PI ? configuredPiExecutable() : '')
     : '';
   pushCheck('executable', Boolean(resolvedPath), resolvedPath || `${executable || '(empty)'} not found in PATH`);
 

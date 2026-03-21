@@ -1,4 +1,4 @@
-import { BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_OPENCODE_ACP } from './backend-detection.mjs';
+import { BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_OPENCODE_ACP, BACKEND_PI } from './backend-detection.mjs';
 import { splitShellArgs } from './utils.mjs';
 
 export const CODEX_PERMISSION_LEVELS = ['readonly', 'low', 'high'];
@@ -128,6 +128,16 @@ export function buildRuntimeControlState(backend, commandPrefix, config = {}) {
     return {
       backend,
       permissionKind: 'opencode-acp',
+      permissionLevel: 'managed',
+      permissionLabel: '后端控制',
+      permissionOptions: [],
+    };
+  }
+
+  if (backend === BACKEND_PI) {
+    return {
+      backend,
+      permissionKind: 'pi',
       permissionLevel: 'managed',
       permissionLabel: '后端控制',
       permissionOptions: [],

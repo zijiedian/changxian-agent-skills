@@ -173,12 +173,22 @@ async function applyMemoryOps({ ops, chatId, request, controller, store }) {
     if (!op?.op) continue;
     try {
       if (op.op === 'upsert') {
-        const existing = op.memory_id ? store.getMemory(chatId, op.memory_id) : null;
+        const matchedTargets = op.memory_id
+          ? []
+          : resolveMemoryTargets(store, chatId, defaultScope, {
+            memory_id: '',
+            scope: op.scope,
+            query: op.query,
+            contains: op.contains,
+          });
+        const existing = op.memory_id
+          ? store.getMemory(chatId, op.memory_id)
+          : (matchedTargets[0] || null);
         const content = String(op.content ?? existing?.content ?? '').trim();
         if (!content) throw new Error('memory content is required');
         const record = store.upsertMemory({
           chatId,
-          memoryId: op.memory_id || '',
+          memoryId: existing?.id || op.memory_id || '',
           scope: normalizeMemoryScope(defaultScope, op.scope ?? existing?.scope),
           kind: normalizeMemoryKind(op.kind, existing?.kind || 'note'),
           title: String(op.title ?? existing?.title ?? clipInline(content)),
@@ -190,7 +200,11 @@ async function applyMemoryOps({ ops, chatId, request, controller, store }) {
           sourceRef: existing?.source_ref || request.externalUserId || request.externalChatId || '',
           expiresAt: op.expires_at ?? existing?.expires_at ?? null,
         });
-        summaries.push(`记忆已保存: ${record?.id || op.memory_id}`);
+        if (existing?.id && matchedTargets.length > 1) {
+          summaries.push(`记忆已更新: ${record?.id || existing.id}（匹配 ${matchedTargets.length} 条，已使用最新一条）`);
+        } else {
+          summaries.push(`${existing?.id ? '记忆已更新' : '记忆已保存'}: ${record?.id || existing?.id || op.memory_id}`);
+        }
         continue;
       }
 

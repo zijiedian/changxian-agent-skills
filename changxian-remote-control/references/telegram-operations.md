@@ -4,6 +4,7 @@
 
 - Send plain text to start a task.
 - Send an image with an optional caption to start an image-aware task.
+- Do not require `/run`; plain text already executes unless the message is a slash command.
 - Use `/status` to inspect progress.
 - Use `/cancel` to stop the current task.
 - Use `/new` to reset the current backend session.
@@ -12,8 +13,10 @@
 
 - `/cwd <path>` changes the working directory.
 - `/cmd low|readonly|high` switches the Codex permission tier when the chat uses the Codex backend.
-- `/cmd <custom-prefix>` can point the current chat at `claude`, `opencode acp`, or `npx -y opencode-ai acp`.
-- `/backend claude|codex|opencode-acp|default` switches the execution backend for the current chat.
+- `/cmd <custom-prefix>` can point the current chat at `claude`, `pi --mode json`, `opencode acp`, or `npx -y opencode-ai acp`.
+- `/backend claude|codex|opencode-acp|pi|default` switches the execution backend for the current chat.
+- `/skill list|enable|disable` inspects or toggles system skills.
+- `/mcp list|enable|disable` inspects or toggles MCP servers.
 - `/setting output_file on|off` toggles output-file upload.
 - `/setting memory on|off` toggles memory injection.
 - `/setting scheduler on|off` toggles the scheduler.
@@ -39,6 +42,17 @@ See `references/claude-backend.md` for the full backend-specific setup and behav
 - When OpenCode asks for tool approval, Telegram now renders the ACP permission options as inline buttons instead of auto-approving `allow_once`.
 
 See `references/opencode-acp.md` for the full backend-specific setup and behavior notes.
+
+## Pi CLI
+
+- Install Pi with `npm install -g @mariozechner/pi-coding-agent`.
+- Use `/backend pi` to switch the current chat to Pi CLI.
+- Use `/backend codex` or `/backend claude` to switch away when needed.
+- Set `RC_DEFAULT_BACKEND=pi` to make Pi the bridge default.
+- Set `RC_PI_COMMAND_PREFIX="pi --mode json --provider anthropic --model sonnet"` when you want Pi pinned to a specific provider or model.
+- Set `RC_PI_EXECUTABLE=/absolute/path/to/pi` when the `pi` binary is not on `PATH`.
+
+See `references/pi-backend.md` for the full backend-specific setup and behavior notes.
 
 ## Channel Publishing
 

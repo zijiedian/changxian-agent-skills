@@ -1,4 +1,5 @@
 import { InlineKeyboard } from 'grammy';
+import { listSystemMcpServers, listSystemSkills } from './resource-registry.mjs';
 
 function clipLabel(text, limit = 18) {
   const value = String(text || '').trim();
@@ -71,7 +72,53 @@ function addMemoryButtons(keyboard, controller, chatId) {
   return keyboard;
 }
 
-export function buildCommandPanelKeyboard(controller, chatId, action) {
+function addSkillButtons(keyboard, options = {}) {
+  const page = Math.max(0, Number(options.page) || 0);
+  const pageSize = 4;
+  const skills = listSystemSkills();
+  const totalPages = Math.max(1, Math.ceil(skills.length / pageSize));
+  const slice = skills.slice(page * pageSize, page * pageSize + pageSize);
+  if (!slice.length) return null;
+  for (const skill of slice) {
+    const label = clipLabel(skill.name, 11);
+    keyboard
+      .text(`详情 ${label}`, `rcctl:skill:show:${page}|${skill.name}`)
+      .text(skill.enabled ? '⚪ 停用' : '🟢 启用', `rcctl:skill:toggle:${page}|${skill.name}`)
+      .row();
+  }
+  if (totalPages > 1) {
+    if (page > 0) keyboard.text('◀ 上页', `rcctl:skill:page:${page - 1}`);
+    keyboard.text(`${page + 1}/${totalPages}`, `rcnoop:skill:${page}`);
+    if (page + 1 < totalPages) keyboard.text('下页 ▶', `rcctl:skill:page:${page + 1}`);
+    keyboard.row();
+  }
+  return keyboard;
+}
+
+function addMcpButtons(keyboard, options = {}) {
+  const page = Math.max(0, Number(options.page) || 0);
+  const pageSize = 4;
+  const servers = listSystemMcpServers();
+  const totalPages = Math.max(1, Math.ceil(servers.length / pageSize));
+  const slice = servers.slice(page * pageSize, page * pageSize + pageSize);
+  if (!slice.length) return null;
+  for (const server of slice) {
+    const label = clipLabel(server.name, 11);
+    keyboard
+      .text(`详情 ${label}`, `rcctl:mcp:show:${page}|${server.name}`)
+      .text(server.enabled ? '⚪ 停用' : '🟢 启用', `rcctl:mcp:toggle:${page}|${server.name}`)
+      .row();
+  }
+  if (totalPages > 1) {
+    if (page > 0) keyboard.text('◀ 上页', `rcctl:mcp:page:${page - 1}`);
+    keyboard.text(`${page + 1}/${totalPages}`, `rcnoop:mcp:${page}`);
+    if (page + 1 < totalPages) keyboard.text('下页 ▶', `rcctl:mcp:page:${page + 1}`);
+    keyboard.row();
+  }
+  return keyboard;
+}
+
+export function buildCommandPanelKeyboard(controller, chatId, action, options = {}) {
   const normalized = String(action || '').trim().toLowerCase();
   const keyboard = new InlineKeyboard();
 
@@ -79,6 +126,8 @@ export function buildCommandPanelKeyboard(controller, chatId, action) {
   if (normalized === 'role') return addRoleButtons(keyboard, controller, chatId);
   if (normalized === 'channel') return addChannelButtons(keyboard, controller);
   if (normalized === 'memory') return addMemoryButtons(keyboard, controller, chatId);
+  if (normalized === 'skill') return addSkillButtons(keyboard, options);
+  if (normalized === 'mcp') return addMcpButtons(keyboard, options);
 
   return undefined;
 }

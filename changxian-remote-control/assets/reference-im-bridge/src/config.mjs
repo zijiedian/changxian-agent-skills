@@ -52,6 +52,7 @@ export function loadConfig() {
   const codexCommandPrefix = String(process.env.CODEX_COMMAND_PREFIX || 'codex -a never --search exec -s danger-full-access --skip-git-repo-check').trim();
   const opencodeCommandPrefix = String(process.env.OPENCODE_ACP_COMMAND_PREFIX || 'opencode acp').trim();
   const claudeCommandPrefix = String(process.env.RC_CLAUDE_COMMAND_PREFIX || 'claude').trim();
+  const piCommandPrefix = String(process.env.RC_PI_COMMAND_PREFIX || 'pi --mode json').trim();
   return {
     stateDir,
     host: String(process.env.RC_HOST || '0.0.0.0').trim(),
@@ -70,9 +71,12 @@ export function loadConfig() {
     codexCommandPrefix,
     claudeCommandPrefix,
     opencodeCommandPrefix,
-    defaultCommandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, claudeCommandPrefix, opencodeCommandPrefix }, defaultBackend),
+    piCommandPrefix,
+    defaultCommandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, claudeCommandPrefix, opencodeCommandPrefix, piCommandPrefix }, defaultBackend),
     codexTimeoutSeconds: Number.parseInt(process.env.CODEX_TIMEOUT_SECONDS || '21600', 10),
     opencodeTimeoutSeconds: Number.parseInt(process.env.OPENCODE_ACP_TIMEOUT_SECONDS || '21600', 10),
+    piTimeoutSeconds: Number.parseInt(process.env.RC_PI_TIMEOUT_SECONDS || '21600', 10),
+    piExecutable: String(process.env.RC_PI_EXECUTABLE || '').trim(),
     defaultTimezone: String(process.env.RC_DEFAULT_TIMEZONE || 'Asia/Shanghai').trim(),
     defaultWorkdir: path.resolve(String(process.env.RC_DEFAULT_WORKDIR || process.cwd()).trim() || process.cwd()),
     maxBufferedOutputChars: Number.parseInt(process.env.RC_MAX_BUFFERED_OUTPUT_CHARS || '200000', 10),

@@ -5,9 +5,10 @@ Unified JavaScript runtime for changxian remote-control.
 - Telegram adapter: `grammy`
 - WeCom adapter: `@wecom/aibot-node-sdk`
 - Shared state: `better-sqlite3`
-- Backend runtimes: Codex SDK, Claude SDK, and OpenCode ACP
+- Backend runtimes: Codex SDK, Claude SDK, OpenCode ACP, and Pi CLI
 - Shared auth, command registry, and host state store
 - Durable memory, reusable roles, and scheduled jobs are managed inside `changxian-remote-control` via `rc-memory-ops`, `rc-role-ops`, and `rc-schedule-ops`
+- When `RC_MEMORY_AUTO_SAVE=1`, recent dialogue is surfaced back into the prompt so the assistant can auto-capture durable memory and refine existing memories with `rc-memory-ops`
 
 ## Quick Start
 
@@ -23,6 +24,10 @@ Set credentials in `.env` before starting:
 - `RC_DEFAULT_BACKEND=claude` to make Claude SDK the default backend
 - `RC_CLAUDE_COMMAND_PREFIX=claude` to configure Claude command flags such as `--permission-mode`
 - `RC_CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude` when `claude` is not on `PATH`
+- `RC_DEFAULT_BACKEND=pi` to make Pi CLI the default backend
+- `RC_PI_COMMAND_PREFIX=pi --mode json` to configure Pi CLI flags such as `--provider` or `--model`
+- `RC_PI_EXECUTABLE=/absolute/path/to/pi` when `pi` is not on `PATH`
+- `RC_PI_TIMEOUT_SECONDS` to control Pi task timeout
 - `RC_DEFAULT_BACKEND=opencode-acp` to make OpenCode ACP the default backend
 - `OPENCODE_ACP_COMMAND_PREFIX=opencode acp` to run the OpenCode ACP backend
 - `OPENCODE_ACP_TIMEOUT_SECONDS` to control ACP task timeout
@@ -31,6 +36,7 @@ Set credentials in `.env` before starting:
 - `TG_CHANNEL_ALLOWED_OPERATOR_IDS` to restrict who can publish
 - `WECOM_BOT_ID` and `WECOM_BOT_SECRET` to enable WeCom
 - `RC_AUTH_PASSPHRASE` to require authentication in chat before tasks can run
+- `RC_MEMORY_AUTO_SAVE=1` to allow memory extraction from recent dialogue context, not only explicit `/memory add`
 
 Only adapters with valid credentials are started.
 
@@ -55,6 +61,35 @@ Per-chat switching:
 
 - `/backend claude`
 - `/backend codex`
+- `/backend pi`
+- `/backend opencode-acp`
+- `/backend default`
+
+## Pi CLI
+
+Pi can be used as the execution backend for Telegram or WeCom chats.
+
+Recommended setup:
+
+```bash
+npm install -g @mariozechner/pi-coding-agent
+pi --version
+```
+
+Authenticate with your preferred provider through Pi itself, for example by exporting an API key or using Pi's `/login` flow in an interactive shell.
+
+Bridge config:
+
+```bash
+RC_DEFAULT_BACKEND=pi
+RC_PI_COMMAND_PREFIX=pi --mode json
+```
+
+Per-chat switching:
+
+- `/backend pi`
+- `/backend codex`
+- `/backend claude`
 - `/backend opencode-acp`
 - `/backend default`
 

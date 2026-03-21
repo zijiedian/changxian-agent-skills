@@ -36,6 +36,16 @@ test('runCommandPreflight recognizes claude backend', () => {
   assert.equal(result.backend, 'claude');
 });
 
+test('runCommandPreflight recognizes pi backend', () => {
+  const result = runCommandPreflight({
+    commandPrefix: 'pi --mode json',
+    workdir: os.tmpdir(),
+    includeAuthProbe: false,
+  });
+
+  assert.equal(result.backend, 'pi');
+});
+
 test('runCommandPreflight accepts a working claude executable', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-claude-preflight-'));
   const executable = path.join(dir, 'claude');

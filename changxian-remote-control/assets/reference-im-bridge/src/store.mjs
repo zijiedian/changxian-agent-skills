@@ -39,6 +39,12 @@ function stableId(prefix) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
 }
 
+function clipConversationContent(value, limit = 4000) {
+  const text = String(value || '').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
 function normalizeWorkdirValue(workdir, { defaultWorkdir, legacyPrefixes = [] }) {
   const raw = String(workdir || '').trim();
   if (!raw) return String(defaultWorkdir);
@@ -99,6 +105,14 @@ export class StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_memories_chat_scope_updated ON memories(chat_id, scope, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_memories_chat_pinned ON memories(chat_id, pinned DESC, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS conversation_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_conversation_messages_chat_created ON conversation_messages(chat_id, created_at DESC, id DESC);
       CREATE TABLE IF NOT EXISTS scheduled_jobs (
         id TEXT PRIMARY KEY,
         chat_id TEXT NOT NULL,
@@ -401,6 +415,44 @@ export class StateStore {
   clearMemoryScope(chatId, scope) {
     const info = this.db.prepare('DELETE FROM memories WHERE chat_id = ? AND scope = ?').run(String(chatId), String(scope));
     return info.changes;
+  }
+
+  appendConversationMessage(chatId, role, content, { maxItems = 24 } = {}) {
+    const trimmed = clipConversationContent(content);
+    if (!trimmed) return null;
+    const now = nowTs();
+    this.db.prepare(`
+      INSERT INTO conversation_messages (chat_id, role, content, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(String(chatId), String(role || 'user'), trimmed, now);
+
+    const rows = this.db.prepare('SELECT id FROM conversation_messages WHERE chat_id = ? ORDER BY created_at DESC, id DESC').all(String(chatId));
+    if (rows.length > maxItems) {
+      const overflow = rows.slice(maxItems).map((row) => row.id);
+      const remove = this.db.prepare('DELETE FROM conversation_messages WHERE id = ?');
+      const tx = this.db.transaction((ids) => {
+        for (const id of ids) remove.run(id);
+      });
+      tx(overflow);
+    }
+
+    return {
+      chat_id: String(chatId),
+      role: String(role || 'user'),
+      content: trimmed,
+      created_at: now,
+    };
+  }
+
+  listConversationMessages(chatId, { limit = 6 } = {}) {
+    const rows = this.db.prepare(`
+      SELECT role, content, created_at
+      FROM conversation_messages
+      WHERE chat_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(String(chatId), Number(limit));
+    return rows.reverse();
   }
 
   countJobs(chatId, { enabledOnly = false } = {}) {

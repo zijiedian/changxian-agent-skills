@@ -13,6 +13,7 @@ type HealthSnapshot = Record<string, any> | null;
 const DEFAULT_CODEX_COMMAND_PREFIX = 'codex -a never --search exec -s danger-full-access --skip-git-repo-check';
 const DEFAULT_CLAUDE_COMMAND_PREFIX = 'claude';
 const DEFAULT_OPENCODE_COMMAND_PREFIX = 'opencode acp';
+const DEFAULT_PI_COMMAND_PREFIX = 'pi --mode json';
 
 function codexHome() {
   return process.env.CODEX_HOME?.trim()
@@ -195,9 +196,10 @@ function runtimeSettings(stateDir: string) {
   const codexCommandPrefix = String(env.CODEX_COMMAND_PREFIX || process.env.CODEX_COMMAND_PREFIX || DEFAULT_CODEX_COMMAND_PREFIX).trim();
   const claudeCommandPrefix = String(env.RC_CLAUDE_COMMAND_PREFIX || process.env.RC_CLAUDE_COMMAND_PREFIX || DEFAULT_CLAUDE_COMMAND_PREFIX).trim();
   const opencodeCommandPrefix = String(env.OPENCODE_ACP_COMMAND_PREFIX || process.env.OPENCODE_ACP_COMMAND_PREFIX || DEFAULT_OPENCODE_COMMAND_PREFIX).trim();
+  const piCommandPrefix = String(env.RC_PI_COMMAND_PREFIX || process.env.RC_PI_COMMAND_PREFIX || DEFAULT_PI_COMMAND_PREFIX).trim();
   return {
     defaultBackend,
-    commandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, claudeCommandPrefix, opencodeCommandPrefix }, defaultBackend),
+    commandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, claudeCommandPrefix, opencodeCommandPrefix, piCommandPrefix }, defaultBackend),
     workdir: path.resolve(String(env.RC_DEFAULT_WORKDIR || process.env.RC_DEFAULT_WORKDIR || process.cwd()).trim() || process.cwd()),
     logFile: path.resolve(String(env.RC_LOG_FILE || process.env.RC_LOG_FILE || bridgeLogFile(stateDir)).trim()),
   };

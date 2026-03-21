@@ -32,6 +32,7 @@ test('runtime control keyboard includes backend, permission, and quick command b
   assert.equal(callbacks.has('rcctl:backend:codex'), true);
   assert.equal(callbacks.has('rcctl:backend:claude'), true);
   assert.equal(callbacks.has('rcctl:backend:opencode-acp'), true);
+  assert.equal(callbacks.has('rcctl:backend:pi'), true);
   assert.equal(callbacks.has('rcctl:perm:readonly'), true);
   assert.equal(callbacks.has('rcctl:perm:low'), true);
   assert.equal(callbacks.has('rcctl:perm:high'), true);
@@ -40,6 +41,7 @@ test('runtime control keyboard includes backend, permission, and quick command b
   assert.equal(callbacks.has('rcctl:cmd:schedule'), true);
   assert.equal(callbacks.has('rcctl:cmd:channel'), true);
   assert.equal(callbacks.has('rcctl:cmd:skill'), true);
+  assert.equal(callbacks.has('rcctl:cmd:mcp'), true);
   assert.equal(callbacks.has('rcctl:cmd:cancel'), true);
   assert.equal(callbacks.has('rcctl:session:new'), true);
 });

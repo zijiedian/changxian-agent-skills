@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { buildCommandPanelKeyboard } from '../src/telegram-command-panels.mjs';
 
@@ -88,4 +91,54 @@ test('memory panel exposes show pin and delete actions', () => {
   assert.equal(callbacks.has('rcctl:memory:show:mem_1'), true);
   assert.equal(callbacks.has('rcctl:memory:pin:mem_1'), true);
   assert.equal(callbacks.has('rcctl:memory:delete:mem_2'), true);
+});
+
+function setupCodexHome() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-telegram-panels-'));
+  fs.mkdirSync(path.join(dir, 'skills', 'alpha-skill'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'skills', 'alpha-skill', 'SKILL.md'), '---\nname: alpha\n---\n');
+  fs.writeFileSync(path.join(dir, 'config.toml'), [
+    '[[skills.config]]',
+    `path = "${path.join(dir, 'skills', 'alpha-skill', 'SKILL.md')}"`,
+    'enabled = true',
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(dir, 'mcp.json'), JSON.stringify({
+    mcp: {
+      playwright: {
+        enabled: true,
+        type: 'local',
+        command: ['npx', '@playwright/mcp@latest'],
+      },
+    },
+  }, null, 2));
+  return dir;
+}
+
+test('skill panel exposes show and toggle actions', () => {
+  const original = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = setupCodexHome();
+  try {
+    const keyboard = buildCommandPanelKeyboard({}, 'chat-1', 'skill');
+    const callbacks = callbackDataSet(keyboard);
+    assert.equal(callbacks.has('rcctl:skill:show:0|alpha-skill'), true);
+    assert.equal(callbacks.has('rcctl:skill:toggle:0|alpha-skill'), true);
+  } finally {
+    if (original == null) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = original;
+  }
+});
+
+test('mcp panel exposes show and toggle actions', () => {
+  const original = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = setupCodexHome();
+  try {
+    const keyboard = buildCommandPanelKeyboard({}, 'chat-1', 'mcp');
+    const callbacks = callbackDataSet(keyboard);
+    assert.equal(callbacks.has('rcctl:mcp:show:0|playwright'), true);
+    assert.equal(callbacks.has('rcctl:mcp:toggle:0|playwright'), true);
+  } finally {
+    if (original == null) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = original;
+  }
 });

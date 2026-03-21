@@ -96,6 +96,12 @@ function detectOpencodeSource(path, resolvedPath) {
   return 'cli';
 }
 
+function detectPiSource(path, resolvedPath) {
+  const joined = `${path}\n${resolvedPath}`;
+  if (joined.includes('node_modules/@mariozechner/pi-coding-agent')) return 'npm';
+  return 'cli';
+}
+
 function codexStatus(env, checkLatest = false) {
   const path = commandPath('codex', env);
   const resolvedPath = path ? safeRealpath(path) : '';
@@ -194,6 +200,37 @@ function opencodeStatus(env, checkLatest = false) {
   };
 }
 
+function piStatus(env, checkLatest = false) {
+  const path = String(env.RC_PI_EXECUTABLE || '').trim() || commandPath('pi', env);
+  const resolvedPath = path ? safeRealpath(path) : '';
+  const versionOutput = path ? execCapture(path, ['--version'], env) : { ok: false, stdout: '', stderr: '' };
+  const installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
+  let latestVersion = '';
+  let updateAvailable = null;
+
+  if (checkLatest) {
+    const latest = execCapture('npm', ['view', '@mariozechner/pi-coding-agent', 'version'], env);
+    latestVersion = extractVersion(latest.stdout || latest.stderr);
+    if (installedVersion && latestVersion) {
+      updateAvailable = compareVersions(installedVersion, latestVersion) < 0;
+    }
+  }
+
+  return {
+    id: 'pi',
+    label: 'Pi CLI',
+    installed: Boolean(path),
+    path,
+    resolvedPath,
+    installedVersion,
+    latestVersion,
+    updateAvailable,
+    source: detectPiSource(path, resolvedPath),
+    updateCommand: 'npm install -g @mariozechner/pi-coding-agent@latest',
+    canUpdate: Boolean(path),
+  };
+}
+
 function updateCodex(env) {
   return execCapture('npm', ['install', '-g', '@openai/codex@latest'], env, UPDATE_TIMEOUT_MS);
 }
@@ -207,6 +244,10 @@ function updateClaude(env, source) {
 
 function updateOpencode(env) {
   return execCapture('opencode', ['upgrade', 'latest'], env, UPDATE_TIMEOUT_MS);
+}
+
+function updatePi(env) {
+  return execCapture('npm', ['install', '-g', '@mariozechner/pi-coding-agent@latest'], env, UPDATE_TIMEOUT_MS);
 }
 
 export function extractVersion(text = '') {
@@ -264,6 +305,7 @@ function inspectStatuses(env, checkLatest = false) {
     codexStatus(env, checkLatest),
     claudeStatus(env, checkLatest),
     opencodeStatus(env, checkLatest),
+    piStatus(env, checkLatest),
   ];
 }
 
@@ -322,6 +364,7 @@ export class CliToolsManager {
       if (status.id === 'codex') result = updateCodex(env);
       if (status.id === 'claude') result = updateClaude(env, status.source);
       if (status.id === 'opencode') result = updateOpencode(env);
+      if (status.id === 'pi') result = updatePi(env);
 
       if (!result?.ok) {
         failed.push({

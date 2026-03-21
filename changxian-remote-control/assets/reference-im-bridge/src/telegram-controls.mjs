@@ -1,5 +1,5 @@
 import { InlineKeyboard } from 'grammy';
-import { BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_OPENCODE_ACP } from './backend-detection.mjs';
+import { BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_OPENCODE_ACP, BACKEND_PI } from './backend-detection.mjs';
 
 function selectedButtonLabel(label, selected) {
   return selected ? `● ${label}` : label;
@@ -13,6 +13,7 @@ export function buildRuntimeControlKeyboard(controller, chatId) {
     .text(selectedButtonLabel('Codex', controls.backend === BACKEND_CODEX), 'rcctl:backend:codex')
     .text(selectedButtonLabel('Claude', controls.backend === BACKEND_CLAUDE), 'rcctl:backend:claude')
     .text(selectedButtonLabel('OpenCode', controls.backend === BACKEND_OPENCODE_ACP), 'rcctl:backend:opencode-acp')
+    .text(selectedButtonLabel('Pi', controls.backend === BACKEND_PI), 'rcctl:backend:pi')
     .row();
 
   if (controls.permissionKind === 'codex' || controls.permissionKind === 'claude') {
@@ -34,10 +35,11 @@ export function buildRuntimeControlKeyboard(controller, chatId) {
     .text('CLI', 'rcctl:cmd:cli')
     .text('技能', 'rcctl:cmd:skill')
     .row()
+    .text('MCP', 'rcctl:cmd:mcp')
     .text('日程', 'rcctl:cmd:schedule')
     .text('频道', 'rcctl:cmd:channel')
-    .text('更新 CLI', 'rcctl:cli:update')
     .row()
+    .text('更新 CLI', 'rcctl:cli:update')
     .text('角色', 'rcctl:cmd:role')
     .text('记忆', 'rcctl:cmd:memory');
 
