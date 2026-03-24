@@ -34,6 +34,25 @@ test('schedule panel exposes run/show/toggle actions for jobs', () => {
   assert.equal(callbacks.has('rcctl:schedule:toggle:job_b'), true);
 });
 
+test('schedule panel does not cap job buttons at five items', () => {
+  const keyboard = buildCommandPanelKeyboard({
+    store: {
+      listJobs() {
+        return Array.from({ length: 6 }, (_, index) => ({
+          id: `job_${index + 1}`,
+          name: `job ${index + 1}`,
+          enabled: true,
+        }));
+      },
+    },
+  }, 'chat-1', 'schedule');
+
+  const callbacks = callbackDataSet(keyboard);
+  assert.equal(callbacks.has('rcctl:schedule:run:job_6'), true);
+  assert.equal(callbacks.has('rcctl:schedule:show:job_6'), true);
+  assert.equal(callbacks.has('rcctl:schedule:toggle:job_6'), true);
+});
+
 test('role panel exposes use/show/clear actions', () => {
   const keyboard = buildCommandPanelKeyboard({
     activeRoleName() {

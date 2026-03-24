@@ -17,6 +17,7 @@ const THINKING_SPINNER_FRAMES = ['-', '\\', '|', '/'];
 const IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif)$/i;
 const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\((\/[^)\n]+?\.(?:png|jpe?g|webp|gif)(?:[#?][^)\n]+)?)\)/gi;
 const MARKDOWN_IMAGE_LINK_RE = /\[([^\]]+)\]\((\/[^)\n]+?\.(?:png|jpe?g|webp|gif)(?:[#?][^)\n]+)?)\)/gi;
+const INLINE_LOCAL_IMAGE_RE = /\/[^\s<>"'()]+?\.(?:png|jpe?g|webp|gif)(?=[\s<>"'`()\[\]{}，。！？；：、,.;!?]|$)/gi;
 const MARKDOWN_LINK_RE = /\[([^\]]*)\]\(([^)\n]+(?:\)[^)\n]+)*)\)/g;
 const BARE_URL_RE = /\bhttps?:\/\/[^\s<>()]+(?:\([^\s<>()]*\)[^\s<>()]*)*/gi;
 const TELEGRAM_HTML_TAG_RE = /<\/?(?:b|strong|i|em|u|ins|s|strike|del|tg-spoiler|a|code|pre)(?:\s+[^<>]*?)?>/gi;
@@ -97,6 +98,9 @@ function extractTelegramMedia(text) {
   });
   rendered = rendered.replace(MARKDOWN_IMAGE_LINK_RE, (_match, label, filePath) => {
     return collectMediaItem(images, seen, filePath, label) || _match;
+  });
+  rendered = rendered.replace(INLINE_LOCAL_IMAGE_RE, (filePath) => {
+    return collectMediaItem(images, seen, filePath, '') || filePath;
   });
 
   const lines = rendered.split(/\r?\n/).map((line) => {
@@ -344,8 +348,7 @@ export function renderTelegramPayload(payload) {
     if (status === 'Running' && (!hasProgressDetails && (marker === 'thinking' || previewLower === 'thinking...' || previewLower.startsWith('thinking\n') || !preview))) {
       const tick = Math.floor(Number(payload.elapsedSeconds) || 0);
       const frame = THINKING_SPINNER_FRAMES[tick % THINKING_SPINNER_FRAMES.length];
-      const dots = '.'.repeat((tick % 3) + 1);
-      const body = `<i>${escapeHtml(frame)} Thinking${dots}</i>`;
+      const body = `<i>${escapeHtml(frame)} Thinking</i>`;
       const html = body;
       return {
         html,
@@ -355,7 +358,12 @@ export function renderTelegramPayload(payload) {
     }
 
     if (status === 'Done') {
-      const pages = buildTelegramStructuredPages(previewModel);
+      const previewForPages = {
+        ...previewModel,
+        content: media.text || previewModel.content,
+        proseMarkdown: media.text || previewModel.proseMarkdown || '',
+      };
+      const pages = buildTelegramStructuredPages(previewForPages);
       return {
         html: pages[0] || '<i>暂无输出</i>',
         pages,
@@ -391,7 +399,11 @@ export function renderTelegramPayload(payload) {
 
   const previewModel = buildStructuredPreview(String(payload || ''), { status: 'Done', marker: 'assistant' });
   const media = extractTelegramMedia(sanitizePreview(previewModel.content || payload || '', 'Done'));
-  const pages = buildTelegramStructuredPages(previewModel);
+  const pages = buildTelegramStructuredPages({
+    ...previewModel,
+    content: media.text || previewModel.content,
+    proseMarkdown: media.text || previewModel.proseMarkdown || '',
+  });
   return {
     html: pages[0] || '<i>暂无输出</i>',
     pages,

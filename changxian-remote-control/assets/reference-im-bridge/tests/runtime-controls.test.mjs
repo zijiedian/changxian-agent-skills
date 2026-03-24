@@ -37,3 +37,9 @@ test('buildRuntimeControlState reports backend-specific permission labels', () =
   assert.equal(buildRuntimeControlState('opencode-acp', 'opencode acp').permissionLabel, '后端控制');
   assert.equal(buildRuntimeControlState('pi', 'pi --mode json').permissionLabel, '后端控制');
 });
+
+test('buildRuntimeControlState treats ACP-backed codex and claude as backend-managed', () => {
+  assert.equal(buildRuntimeControlState('codex', 'codex-acp').permissionLabel, '后端控制');
+  assert.equal(buildRuntimeControlState('claude', 'claude-agent-acp').permissionLabel, '后端控制');
+  assert.equal(buildRuntimeControlState('pi', 'pi-acp').permissionLabel, '后端控制');
+});

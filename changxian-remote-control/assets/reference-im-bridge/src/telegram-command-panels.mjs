@@ -8,7 +8,7 @@ function clipLabel(text, limit = 18) {
 }
 
 function addScheduleButtons(keyboard, controller, chatId) {
-  const jobs = controller.store.listJobs(chatId).slice(0, 5);
+  const jobs = controller.store.listJobs(chatId);
   if (!jobs.length) return null;
   for (const job of jobs) {
     keyboard

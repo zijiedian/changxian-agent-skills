@@ -8,11 +8,13 @@ import {
   BACKEND_OPENCODE_ACP,
   BACKEND_PI,
   detectBackend,
+  isAcpCommandPrefix,
 } from './backend-detection.mjs';
 import { redactedCommandText, splitShellArgs } from './utils.mjs';
 
 const REMOTE_CONTROL_ENV_RE = /^(?:TG_|WECOM_|RC_AUTH_|RC_CODEX_|RC_CLAUDE_|RC_OPENCODE_|RC_PI_|RC_DEFAULT_BACKEND$|RC_HOST$|RC_PORT$|RC_ENABLE_|RC_MEMORY_|RC_SCHEDULER_|RC_REPLY_|RC_MAX_|RC_DEFAULT_TIMEZONE$|OPENCODE_ACP_)/;
 const VERSION_PROBE_ARGS = [['--version'], ['version'], ['-v']];
+const ACP_VERSION_PROBE_ARGS = [['--version'], ['version'], ['-v'], ['--help'], ['-h']];
 const CODEX_AUTH_PROBE_ARGS = [['login', 'status'], ['auth', 'status']];
 const CLAUDE_AUTH_PROBE_ARGS = [['auth', 'status']];
 
@@ -56,18 +58,6 @@ function runProbe(executable, args, env) {
   };
 }
 
-function configuredClaudeExecutable() {
-  const value = String(process.env.RC_CLAUDE_CODE_EXECUTABLE || '').trim();
-  if (!value) return '';
-  return fs.existsSync(value) ? path.resolve(value) : '';
-}
-
-function configuredPiExecutable() {
-  const value = String(process.env.RC_PI_EXECUTABLE || '').trim();
-  if (!value) return '';
-  return fs.existsSync(value) ? path.resolve(value) : '';
-}
-
 export function buildExecutionEnv(baseEnv = process.env, overrides = {}) {
   const env = { ...baseEnv };
   for (const key of Object.keys(env)) {
@@ -89,6 +79,7 @@ export function runCommandPreflight(options = {}) {
   const args = splitShellArgs(commandPrefix);
   const executable = args[0] || '';
   const backend = detectBackend(commandPrefix);
+  const acpManaged = isAcpCommandPrefix(commandPrefix, backend);
   const checks = [];
 
   const pushCheck = (name, ok, detail, severity = ok ? 'info' : 'error') => {
@@ -102,40 +93,44 @@ export function runCommandPreflight(options = {}) {
     'backend',
     backend === BACKEND_CODEX || backend === BACKEND_CLAUDE || backend === BACKEND_OPENCODE_ACP || backend === BACKEND_PI,
     backend === BACKEND_CODEX
-      ? 'codex sdk'
+      ? (acpManaged ? 'codex acp' : 'codex sdk')
       : backend === BACKEND_CLAUDE
-        ? 'claude sdk'
+        ? (acpManaged ? 'claude acp' : 'claude sdk')
         : backend === BACKEND_OPENCODE_ACP
           ? 'opencode acp'
           : backend === BACKEND_PI
-            ? 'pi cli'
-          : 'unsupported command prefix',
+            ? (acpManaged ? 'pi acp' : 'pi cli')
+            : 'unsupported command prefix',
   );
 
   if (args.some((arg) => /<[^>]+>/.test(arg))) {
     pushCheck('command-template', false, 'command prefix still contains angle-bracket placeholders');
   }
 
-  const resolvedPath = executable
-    ? which(executable, shell, env) || (backend === BACKEND_CLAUDE ? configuredClaudeExecutable() : backend === BACKEND_PI ? configuredPiExecutable() : '')
-    : '';
+  const resolvedPath = executable ? which(executable, shell, env) : '';
   pushCheck('executable', Boolean(resolvedPath), resolvedPath || `${executable || '(empty)'} not found in PATH`);
 
   let version = '';
   let versionOk = false;
   if (resolvedPath) {
-    for (const probeArgs of VERSION_PROBE_ARGS) {
+    const probeArgsList = acpManaged ? ACP_VERSION_PROBE_ARGS : VERSION_PROBE_ARGS;
+    for (const probeArgs of probeArgsList) {
       const probe = runProbe(resolvedPath, probeArgs, env);
       if (!probe.ok) continue;
       version = firstLine(probe.stdout || probe.stderr);
       versionOk = true;
       break;
     }
-    pushCheck('version', versionOk, version || `failed to query version for ${resolvedPath}`);
+    pushCheck(
+      'version',
+      versionOk,
+      version || (acpManaged ? `${path.basename(resolvedPath)} ready` : `failed to query version for ${resolvedPath}`),
+      versionOk ? 'info' : (acpManaged ? 'warn' : 'error'),
+    );
   }
 
   let auth = '';
-  if (includeAuthProbe && resolvedPath && backend === BACKEND_CODEX) {
+  if (includeAuthProbe && resolvedPath && backend === BACKEND_CODEX && !acpManaged) {
     let authOk = false;
     for (const probeArgs of CODEX_AUTH_PROBE_ARGS) {
       const probe = runProbe(resolvedPath, probeArgs, env);
@@ -147,7 +142,7 @@ export function runCommandPreflight(options = {}) {
     if (auth) {
       pushCheck('auth', authOk, auth || 'codex login status failed', authOk ? 'info' : 'warn');
     }
-  } else if (includeAuthProbe && resolvedPath && backend === BACKEND_CLAUDE) {
+  } else if (includeAuthProbe && resolvedPath && backend === BACKEND_CLAUDE && !acpManaged) {
     let authOk = false;
     for (const probeArgs of CLAUDE_AUTH_PROBE_ARGS) {
       const probe = runProbe(resolvedPath, probeArgs, env);

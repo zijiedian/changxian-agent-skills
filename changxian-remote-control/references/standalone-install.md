@@ -61,7 +61,7 @@ npm run start
 
 ## State And Health
 
-- Default state dir: `$CODEX_HOME/changxian-agent/remote-control-js` or `~/.codex/changxian-agent/remote-control-js`
+- Default state dir: `$CODEX_HOME/changxian-agent/remote-control` or `~/.codex/changxian-agent/remote-control`
 - Health endpoint: `http://127.0.0.1:<RC_PORT>/healthz`
 - The bridge runtime stores host bindings, durable memory, reusable roles, and scheduled jobs in the same state directory.
 

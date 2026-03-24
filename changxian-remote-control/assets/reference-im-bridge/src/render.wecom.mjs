@@ -52,6 +52,30 @@ function progressHeading(preview) {
   return '';
 }
 
+function firstNonEmptyLine(text = '') {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || '';
+}
+
+function buildWeComProgressContent(preview, elapsedText) {
+  const lines = [];
+  const summary = String(preview?.summary || '').trim() || firstNonEmptyLine(preview?.content || '');
+  const firstHighlight = Array.isArray(preview?.highlights) ? String(preview.highlights[0] || '').trim() : '';
+  const firstCheck = Array.isArray(preview?.checks) ? String(preview.checks[0] || '').trim() : '';
+
+  if (summary) lines.push(summary);
+  if (firstHighlight && !lines.some((line) => line.includes(firstHighlight))) lines.push(firstHighlight);
+  if (firstCheck && !lines.some((line) => line.includes(firstCheck))) lines.push(firstCheck);
+  if (!lines.length) {
+    const heading = progressHeading(preview);
+    if (heading) lines.push(heading);
+  }
+  lines.push(elapsedText);
+  return clipMessage(lines.filter(Boolean).join('\n'));
+}
+
 function buildWeComStructuredPages(preview) {
   const pages = [];
   const narrative = String(preview.proseMarkdown || '').trim();
@@ -112,25 +136,7 @@ export function renderWeComPayload(payload) {
       };
     }
 
-    const body = buildDetailedProgressMarkdown(previewModel, {
-      heading: progressHeading(previewModel),
-      maxHighlights: 2,
-      maxChecks: 1,
-      maxFiles: 3,
-      maxNotes: 0,
-      includeDiffHint: previewModel.phase === 'diff',
-      maxDiffFiles: 2,
-      maxHunksPerFile: 2,
-      maxLinesPerHunk: 10,
-      maxLinesPerFile: 32,
-      maxTotalLines: 96,
-    });
-    const fallbackLines = [];
-    const heading = progressHeading(previewModel);
-    if (heading) fallbackLines.push(`**${heading}**`);
-    if (previewModel.summary) fallbackLines.push(previewModel.summary);
-    const resolvedBody = body || fallbackLines.join('\n').trim() || (status === 'Running' ? '请稍候。' : '暂无输出');
-    const content = clipMessage(status === 'Running' ? `${resolvedBody}\n${elapsedText}` : resolvedBody);
+    const content = buildWeComProgressContent(previewModel, elapsedText);
     return { content, pages: [content] };
   }
 

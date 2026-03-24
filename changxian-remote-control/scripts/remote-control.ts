@@ -4,16 +4,17 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { execFileSync, spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { BACKEND_CODEX, defaultCommandPrefixForBackend, normalizeBackendAlias } from '../assets/reference-im-bridge/src/backend-detection.mjs';
 import { runCommandPreflight } from '../assets/reference-im-bridge/src/preflight.mjs';
 
 type ArgMap = Record<string, string | boolean>;
 type HealthSnapshot = Record<string, any> | null;
 
-const DEFAULT_CODEX_COMMAND_PREFIX = 'codex -a never --search exec -s danger-full-access --skip-git-repo-check';
-const DEFAULT_CLAUDE_COMMAND_PREFIX = 'claude';
+const DEFAULT_CODEX_COMMAND_PREFIX = 'codex-acp';
+const DEFAULT_CLAUDE_COMMAND_PREFIX = 'claude-agent-acp';
 const DEFAULT_OPENCODE_COMMAND_PREFIX = 'opencode acp';
-const DEFAULT_PI_COMMAND_PREFIX = 'pi --mode json';
+const DEFAULT_PI_COMMAND_PREFIX = 'pi-acp';
 
 function codexHome() {
   return process.env.CODEX_HOME?.trim()
@@ -24,7 +25,7 @@ function codexHome() {
 function defaultStateDir() {
   return process.env.RC_STATE_DIR?.trim()
     ? path.resolve(process.env.RC_STATE_DIR.trim())
-    : path.join(codexHome(), 'changxian-agent', 'remote-control-js');
+    : path.join(codexHome(), 'changxian-agent', 'remote-control');
 }
 
 function parseArgs(argv: string[]) {
@@ -69,7 +70,27 @@ function readEnvFile(filePath: string) {
   return env;
 }
 
-function usage() {
+export function updateEnvText(source: string, updates: Record<string, string>) {
+  const lines = String(source || '').split(/\r?\n/);
+  const seen = new Set<string>();
+  const nextLines = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return line;
+    const index = line.indexOf('=');
+    if (index < 0) return line;
+    const key = line.slice(0, index).trim();
+    if (!Object.prototype.hasOwnProperty.call(updates, key)) return line;
+    seen.add(key);
+    return `${key}=${updates[key]}`;
+  });
+  for (const [key, value] of Object.entries(updates)) {
+    if (!seen.has(key)) nextLines.push(`${key}=${value}`);
+  }
+  const normalized = nextLines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
+  return normalized ? `${normalized}\n` : '';
+}
+
+export function usage() {
   return [
     'changxian-remote-control',
     '',
@@ -84,6 +105,8 @@ function usage() {
     '  logs [N] [--state-dir <dir>] [--file <log_file>]',
     '  doctor [--state-dir <dir>] [--url <healthz_url>]',
     '  health [--state-dir <dir>] [--url <healthz_url>]',
+    '  weixin-login [--state-dir <dir>]',
+    '  weixin-start [--foreground] [--state-dir <dir>] [--log-file <file>] [--account-id <id>]',
   ].join('\n');
 }
 
@@ -102,6 +125,18 @@ function defaultLogFile(stateDir: string) {
 
 function bridgeLogFile(stateDir: string) {
   return path.join(stateDir, 'reference-im-bridge.log');
+}
+
+function stateEnvFile(stateDir: string) {
+  return path.join(stateDir, '.env');
+}
+
+function writeEnvUpdates(stateDir: string, updates: Record<string, string>) {
+  const filePath = stateEnvFile(stateDir);
+  const current = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+  const next = updateEnvText(current, updates);
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(filePath, next, 'utf8');
 }
 
 function resolvePort(stateDir: string) {
@@ -398,6 +433,34 @@ async function stopRuntime(stateDir: string) {
   console.log(`killed: pid=${pid}`);
 }
 
+async function runWeixinLogin(stateDir: string) {
+  const sdk = await import('weixin-agent-sdk');
+  if (typeof sdk.login !== 'function') {
+    throw new Error('weixin-agent-sdk missing login()');
+  }
+  const accountId = String(await sdk.login({
+    log: (message: string) => {
+      if (message) console.log(String(message));
+    },
+  }) || '').trim();
+  if (!accountId) throw new Error('weixin-agent-sdk login returned empty account id');
+  writeEnvUpdates(stateDir, { WEIXIN_ACCOUNT_ID: accountId });
+  console.log(`weixin_account_id: ${accountId}`);
+}
+
+async function runWeixinStart(stateDir: string, logFile: string, foreground: boolean, accountId = '') {
+  const existing = readEnvFile(stateEnvFile(stateDir));
+  const resolvedAccountId = String(accountId || existing.WEIXIN_ACCOUNT_ID || '').trim();
+  const updates: Record<string, string> = { WEIXIN_ENABLED: '1' };
+  if (resolvedAccountId) updates.WEIXIN_ACCOUNT_ID = resolvedAccountId;
+  writeEnvUpdates(stateDir, updates);
+
+  if (resolveRunningPid(stateDir)) {
+    await stopRuntime(stateDir);
+  }
+  await startRuntime(stateDir, logFile, foreground);
+}
+
 async function main() {
   const { positionals, flags } = parseArgs(process.argv.slice(2));
   const command = String(positionals[0] || 'help').toLowerCase();
@@ -441,11 +504,22 @@ async function main() {
     console.log(body);
     return;
   }
+  if (command === 'weixin-login') {
+    await runWeixinLogin(stateDir);
+    return;
+  }
+  if (command === 'weixin-start') {
+    await runWeixinStart(stateDir, logFile, foreground, stringFlag(flags, 'account-id'));
+    return;
+  }
 
   throw new Error(`unknown command: ${command}`);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+const isMain = process.argv[1] ? pathToFileURL(process.argv[1]).href === import.meta.url : false;
+if (isMain) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

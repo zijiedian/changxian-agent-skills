@@ -1301,6 +1301,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
   const maxChecks = Math.max(0, Number(options.maxChecks) || 0);
   const maxFiles = Math.max(0, Number(options.maxFiles) || 0);
   const maxNotes = Math.max(0, Number(options.maxNotes) || 0);
+  const showOverflowCounts = options.showOverflowCounts !== false;
   const lines = [];
 
   if (heading) lines.push(`**${heading}**`);
@@ -1312,7 +1313,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
       lines.push(`- ${item}`);
     }
     const extraHighlights = value.highlights.length - Math.min(value.highlights.length, maxHighlights);
-    if (extraHighlights > 0) lines.push(`- 还有 ${extraHighlights} 条摘要`);
+    if (showOverflowCounts && extraHighlights > 0) lines.push(`- 还有 ${extraHighlights} 条摘要`);
   }
 
   if (maxFiles > 0 && value.changedFiles.length) {
@@ -1322,7 +1323,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
       lines.push(`- ${file}`);
     }
     const extraFiles = value.changedFiles.length - Math.min(value.changedFiles.length, maxFiles);
-    if (extraFiles > 0) lines.push(`- 还有 ${extraFiles} 个文件`);
+    if (showOverflowCounts && extraFiles > 0) lines.push(`- 还有 ${extraFiles} 个文件`);
   }
 
   if (maxChecks > 0 && value.checks.length) {
@@ -1332,7 +1333,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
       lines.push(`- ${item}`);
     }
     const extraChecks = value.checks.length - Math.min(value.checks.length, maxChecks);
-    if (extraChecks > 0) lines.push(`- 还有 ${extraChecks} 条验证结果`);
+    if (showOverflowCounts && extraChecks > 0) lines.push(`- 还有 ${extraChecks} 条验证结果`);
   }
 
   if (maxNotes > 0 && value.notes.length) {
@@ -1341,7 +1342,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
       lines.push(item);
     }
     const extraNotes = value.notes.length - Math.min(value.notes.length, maxNotes);
-    if (extraNotes > 0) lines.push(`还有 ${extraNotes} 条补充说明。`);
+    if (showOverflowCounts && extraNotes > 0) lines.push(`还有 ${extraNotes} 条补充说明。`);
   }
 
   if (value.diffBlocks.length && options.includeDiffHint !== false) {

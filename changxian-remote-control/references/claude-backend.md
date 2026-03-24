@@ -1,6 +1,6 @@
-# Claude Backend
+# Claude ACP
 
-The bridge supports Claude SDK as a backend, using the `@anthropic-ai/claude-agent-sdk` to connect to Claude Code CLI.
+The bridge supports Claude through `claude-agent-acp`, using ACP over stdio.
 
 ## Switching to Claude Backend
 
@@ -20,38 +20,27 @@ To restore the default backend:
 
 | Variable | Default | Description |
 |---|---|---|
-| `RC_CLAUDE_COMMAND_PREFIX` | `claude` | Command prefix for Claude CLI |
-| `RC_CLAUDE_CODE_EXECUTABLE` | (auto-detect) | Path to Claude CLI executable |
+| `RC_CLAUDE_COMMAND_PREFIX` | `claude-agent-acp` | Command prefix for Claude ACP |
 | `RC_ENV_ISOLATION` | `inherit` | Environment isolation mode |
 
 ## Requirements
 
-- Claude Code CLI installed (version >= 2.x recommended)
-- CLI must be authenticated via `claude auth login`
+- `npm install -g @zed-industries/claude-agent-acp`
+- Claude must be authenticated via `claude auth login`
 
 ## Diagnostics
 
-Use `/setting` to check Claude SDK status:
+Use `/setting` to check Claude ACP status:
 
 ```
 /setting
 ```
 
 Look for lines like:
-- `claude_sdk: initialized` or `lazy`
-- `claude_cli: /path/to/claude`
-- `claude_version: claude 2.x.x`
+- `claude_acp: initialized` or `lazy`
+- `claude_agent: <name/version>`
+- `claude_cli: /path/to/claude-agent-acp`
 
-## Permission Modes
+## Permissions
 
-The Claude backend supports `--permission-mode` flag in the command prefix:
-
-- `default` - Ask before executing tools
-- `plan` - Plan only mode
-- `acceptEdits` - Accept edits without prompting
-
-Example with permission mode:
-
-```
-/cmd claude --permission-mode acceptEdits
-```
+Claude ACP permissions are controlled by the ACP adapter / Claude runtime itself, not by bridge-side preset flags.

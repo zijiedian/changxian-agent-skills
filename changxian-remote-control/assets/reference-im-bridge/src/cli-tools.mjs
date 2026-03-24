@@ -78,15 +78,14 @@ function numericParts(version) {
 
 function detectCodexSource(path, resolvedPath) {
   const joined = `${path}\n${resolvedPath}`;
-  if (joined.includes('@openai/codex')) return 'npm';
+  if (joined.includes('@zed-industries/codex-acp')) return 'npm';
   return '';
 }
 
-function detectClaudeSource(path, resolvedPath, env) {
+function detectClaudeSource(path, resolvedPath) {
   const joined = `${path}\n${resolvedPath}`;
-  if (joined.includes('/Caskroom/claude-code/')) return 'brew-cask';
-  if (String(env.RC_CLAUDE_CODE_EXECUTABLE || '').trim()) return 'custom';
-  return 'cli';
+  if (joined.includes('@zed-industries/claude-agent-acp')) return 'npm';
+  return '';
 }
 
 function detectOpencodeSource(path, resolvedPath) {
@@ -98,20 +97,20 @@ function detectOpencodeSource(path, resolvedPath) {
 
 function detectPiSource(path, resolvedPath) {
   const joined = `${path}\n${resolvedPath}`;
-  if (joined.includes('node_modules/@mariozechner/pi-coding-agent')) return 'npm';
-  return 'cli';
+  if (joined.includes('node_modules/pi-acp')) return 'npm';
+  return '';
 }
 
 function codexStatus(env, checkLatest = false) {
-  const path = commandPath('codex', env);
+  const path = commandPath('codex-acp', env);
   const resolvedPath = path ? safeRealpath(path) : '';
-  const versionOutput = path ? execCapture(path, ['--version'], env) : { ok: false, stdout: '', stderr: '' };
+  const versionOutput = path ? execCapture(path, ['--help'], env) : { ok: false, stdout: '', stderr: '' };
   const installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
   let latestVersion = '';
   let updateAvailable = null;
 
   if (checkLatest) {
-    const latest = execCapture('npm', ['view', '@openai/codex', 'version'], env);
+    const latest = execCapture('npm', ['view', '@zed-industries/codex-acp', 'version'], env);
     latestVersion = extractVersion(latest.stdout || latest.stderr);
     if (installedVersion && latestVersion) {
       updateAvailable = compareVersions(installedVersion, latestVersion) < 0;
@@ -120,7 +119,7 @@ function codexStatus(env, checkLatest = false) {
 
   return {
     id: 'codex',
-    label: 'Codex CLI',
+    label: 'Codex ACP',
     installed: Boolean(path),
     path,
     resolvedPath,
@@ -128,35 +127,31 @@ function codexStatus(env, checkLatest = false) {
     latestVersion,
     updateAvailable,
     source: detectCodexSource(path, resolvedPath),
-    updateCommand: 'npm install -g @openai/codex@latest',
+    updateCommand: 'npm install -g @zed-industries/codex-acp@latest',
     canUpdate: Boolean(path),
   };
 }
 
 function claudeStatus(env, checkLatest = false) {
-  const path = String(env.RC_CLAUDE_CODE_EXECUTABLE || '').trim() || commandPath('claude', env);
+  const path = commandPath('claude-agent-acp', env);
   const resolvedPath = path ? safeRealpath(path) : '';
-  const versionOutput = path ? execCapture(path, ['--version'], env) : { ok: false, stdout: '', stderr: '' };
+  const versionOutput = path ? execCapture(path, ['--help'], env) : { ok: false, stdout: '', stderr: '' };
   const installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
   let latestVersion = '';
   let updateAvailable = null;
 
   if (checkLatest) {
-    const info = execCapture('brew', ['info', '--cask', 'claude-code', '--json=v2'], env);
-    const parsed = info.ok ? parseJson(info.stdout) : null;
-    const cask = parsed?.casks?.[0];
-    latestVersion = normalizeSemver(cask?.version || '');
-    if (typeof cask?.outdated === 'boolean') {
-      updateAvailable = cask.outdated;
-    } else if (installedVersion && latestVersion) {
+    const latest = execCapture('npm', ['view', '@zed-industries/claude-agent-acp', 'version'], env);
+    latestVersion = extractVersion(latest.stdout || latest.stderr);
+    if (installedVersion && latestVersion) {
       updateAvailable = compareVersions(installedVersion, latestVersion) < 0;
     }
   }
 
-  const source = detectClaudeSource(path, resolvedPath, env);
+  const source = detectClaudeSource(path, resolvedPath);
   return {
     id: 'claude',
-    label: 'Claude Code',
+    label: 'Claude ACP',
     installed: Boolean(path),
     path,
     resolvedPath,
@@ -164,7 +159,7 @@ function claudeStatus(env, checkLatest = false) {
     latestVersion,
     updateAvailable,
     source,
-    updateCommand: source === 'brew-cask' ? 'brew upgrade --cask claude-code' : 'claude update',
+    updateCommand: 'npm install -g @zed-industries/claude-agent-acp@latest',
     canUpdate: Boolean(path),
   };
 }
@@ -201,15 +196,15 @@ function opencodeStatus(env, checkLatest = false) {
 }
 
 function piStatus(env, checkLatest = false) {
-  const path = String(env.RC_PI_EXECUTABLE || '').trim() || commandPath('pi', env);
+  const path = commandPath('pi-acp', env);
   const resolvedPath = path ? safeRealpath(path) : '';
-  const versionOutput = path ? execCapture(path, ['--version'], env) : { ok: false, stdout: '', stderr: '' };
+  const versionOutput = path ? execCapture(path, ['--help'], env) : { ok: false, stdout: '', stderr: '' };
   const installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
   let latestVersion = '';
   let updateAvailable = null;
 
   if (checkLatest) {
-    const latest = execCapture('npm', ['view', '@mariozechner/pi-coding-agent', 'version'], env);
+    const latest = execCapture('npm', ['view', 'pi-acp', 'version'], env);
     latestVersion = extractVersion(latest.stdout || latest.stderr);
     if (installedVersion && latestVersion) {
       updateAvailable = compareVersions(installedVersion, latestVersion) < 0;
@@ -218,7 +213,7 @@ function piStatus(env, checkLatest = false) {
 
   return {
     id: 'pi',
-    label: 'Pi CLI',
+    label: 'Pi ACP',
     installed: Boolean(path),
     path,
     resolvedPath,
@@ -226,20 +221,17 @@ function piStatus(env, checkLatest = false) {
     latestVersion,
     updateAvailable,
     source: detectPiSource(path, resolvedPath),
-    updateCommand: 'npm install -g @mariozechner/pi-coding-agent@latest',
+    updateCommand: 'npm install -g pi-acp@latest',
     canUpdate: Boolean(path),
   };
 }
 
 function updateCodex(env) {
-  return execCapture('npm', ['install', '-g', '@openai/codex@latest'], env, UPDATE_TIMEOUT_MS);
+  return execCapture('npm', ['install', '-g', '@zed-industries/codex-acp@latest'], env, UPDATE_TIMEOUT_MS);
 }
 
 function updateClaude(env, source) {
-  if (source === 'brew-cask') {
-    return execCapture('brew', ['upgrade', '--cask', 'claude-code'], env, UPDATE_TIMEOUT_MS);
-  }
-  return execCapture('claude', ['update'], env, UPDATE_TIMEOUT_MS);
+  return execCapture('npm', ['install', '-g', '@zed-industries/claude-agent-acp@latest'], env, UPDATE_TIMEOUT_MS);
 }
 
 function updateOpencode(env) {
@@ -247,7 +239,7 @@ function updateOpencode(env) {
 }
 
 function updatePi(env) {
-  return execCapture('npm', ['install', '-g', '@mariozechner/pi-coding-agent@latest'], env, UPDATE_TIMEOUT_MS);
+  return execCapture('npm', ['install', '-g', 'pi-acp@latest'], env, UPDATE_TIMEOUT_MS);
 }
 
 export function extractVersion(text = '') {

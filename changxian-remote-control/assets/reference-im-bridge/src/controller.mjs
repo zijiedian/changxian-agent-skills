@@ -11,16 +11,16 @@ import {
   backendLabel,
   defaultCommandPrefixForBackend,
   detectBackend,
+  isAcpCommandPrefix,
   normalizeBackendAlias,
 } from './backend-detection.mjs';
-import { CodexSdkProvider } from './codex-sdk-provider.mjs';
-import { ClaudeSdkProvider } from './claude-sdk-provider.mjs';
-import { extractStructuredPreview } from './codex.mjs';
+import { CodexAcpProvider } from './codex-acp-provider.mjs';
+import { ClaudeAgentAcpProvider } from './claude-agent-acp-provider.mjs';
 import { OpencodeAcpProvider } from './opencode-acp-provider.mjs';
-import { PiCliProvider } from './pi-cli-provider.mjs';
+import { PiAcpProvider } from './pi-acp-provider.mjs';
 import { buildExecutionEnv, runCommandPreflight } from './preflight.mjs';
 import { parseChannelCommandInput } from './telegram-channel-publisher.mjs';
-import { redactedCommandText, truncateText } from './utils.mjs';
+import { extractStructuredPreview, redactedCommandText, truncateText } from './utils.mjs';
 import {
   buildClaudePermissionPrefix,
   buildCodexPermissionPrefix,
@@ -130,10 +130,10 @@ export class RuntimeController {
     this.authSessions = new Map();
     this.scheduler = null;
     this.preflightCache = new Map();
-    this.codexSdk = new CodexSdkProvider(config, buildExecutionEnv);
-    this.claudeSdk = new ClaudeSdkProvider(config, buildExecutionEnv);
+    this.codexAcp = new CodexAcpProvider(config, buildExecutionEnv);
+    this.claudeAcp = new ClaudeAgentAcpProvider(config, buildExecutionEnv);
     this.opencodeAcp = new OpencodeAcpProvider(config, buildExecutionEnv);
-    this.piCli = new PiCliProvider(config, buildExecutionEnv);
+    this.piAcp = new PiAcpProvider(config, buildExecutionEnv);
     this.cliTools = new CliToolsManager(() => this.executionEnv());
     this.telegramChannelPublisher = null;
   }
@@ -224,11 +224,11 @@ export class RuntimeController {
     return buildRuntimeControlState(this.effectiveBackend(chatId), this.effectiveCommandPrefix(chatId), this.config);
   }
 
-  backendProvider(backend) {
-    if (backend === BACKEND_CODEX) return this.codexSdk;
+  backendProvider(backend, commandPrefix = '') {
+    if (backend === BACKEND_CODEX) return this.codexAcp;
     if (backend === BACKEND_OPENCODE_ACP) return this.opencodeAcp;
-    if (backend === BACKEND_CLAUDE) return this.claudeSdk;
-    if (backend === BACKEND_PI) return this.piCli;
+    if (backend === BACKEND_CLAUDE) return this.claudeAcp;
+    if (backend === BACKEND_PI) return this.piAcp;
     return null;
   }
 
@@ -644,10 +644,10 @@ export class RuntimeController {
   }
 
   handleSettingCommand() {
-    const codexSdk = this.codexSdk.getDiagnostics();
-    const claudeSdk = this.claudeSdk.getDiagnostics();
+    const codexAcp = this.codexAcp.getDiagnostics();
+    const claudeAcp = this.claudeAcp.getDiagnostics();
     const opencodeAcp = this.opencodeAcp.getDiagnostics();
-    const piCli = this.piCli.getDiagnostics();
+    const piAcp = this.piAcp.getDiagnostics();
     return [
       `default_backend: ${this.config.defaultBackend}`,
       `auth: ${this.isSecondFactorEnabled() ? `enabled (${formatSeconds(this.config.authTtlSeconds)})` : 'disabled'}`,
@@ -660,20 +660,24 @@ export class RuntimeController {
       `default_workdir: ${this.config.defaultWorkdir}`,
       `default_command_prefix: ${redactedCommandText(this.config.defaultCommandPrefix)}`,
       `codex_command_prefix: ${redactedCommandText(this.config.codexCommandPrefix)}`,
-      `claude_command_prefix: ${redactedCommandText(this.config.claudeCommandPrefix || 'claude')}`,
+      `claude_command_prefix: ${redactedCommandText(this.config.claudeCommandPrefix || 'claude-agent-acp')}`,
       `opencode_acp_command_prefix: ${redactedCommandText(this.config.opencodeCommandPrefix)}`,
-      `pi_command_prefix: ${redactedCommandText(this.config.piCommandPrefix || 'pi --mode json')}`,
-      `codex_sdk: ${codexSdk.initialized ? 'initialized' : 'lazy'}`,
-      `codex_model_passthrough: ${codexSdk.modelPassthrough ? 'enabled' : 'disabled'}`,
-      `codex_auth: ${codexSdk.authSource}`,
-      `codex_base_url: ${codexSdk.baseUrlSource}`,
-      ...(codexSdk.lastInitError ? [`codex_last_init_error: ${codexSdk.lastInitError}`] : []),
-      ...(codexSdk.lastResumeSkipReason ? [`codex_last_resume_skip: ${codexSdk.lastResumeSkipReason}`] : []),
-      ...(codexSdk.lastTransientRetryReason ? [`codex_last_transient_retry: ${codexSdk.lastTransientRetryReason}`] : []),
-      `claude_sdk: ${claudeSdk.initialized ? 'initialized' : 'lazy'}`,
-      `claude_cli: ${claudeSdk.cliPath || '(not found)'}`,
-      `claude_version: ${claudeSdk.cliVersion || 'unknown'}`,
-      ...(claudeSdk.lastInitError ? [`claude_last_init_error: ${claudeSdk.lastInitError}`] : []),
+      `pi_command_prefix: ${redactedCommandText(this.config.piCommandPrefix || 'pi-acp')}`,
+      `codex_acp: ${codexAcp.initialized ? 'initialized' : 'lazy'}`,
+      `codex_acp_agent: ${[codexAcp.agentName, codexAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
+      `codex_acp_auth_methods: ${codexAcp.authMethods?.length ? codexAcp.authMethods.join(', ') : '(none reported)'}`,
+      ...(codexAcp.lastInitError ? [`codex_acp_last_init_error: ${codexAcp.lastInitError}`] : []),
+      ...(codexAcp.lastResumeSkipReason ? [`codex_acp_last_resume_skip: ${codexAcp.lastResumeSkipReason}`] : []),
+      ...(codexAcp.lastPermissionDecision ? [`codex_acp_last_permission: ${codexAcp.lastPermissionDecision}`] : []),
+      ...(codexAcp.lastStopReason ? [`codex_acp_last_stop_reason: ${codexAcp.lastStopReason}`] : []),
+      `claude_acp: ${claudeAcp.initialized ? 'initialized' : 'lazy'}`,
+      `claude_acp_agent: ${[claudeAcp.agentName, claudeAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
+      `claude_acp_auth_methods: ${claudeAcp.authMethods?.length ? claudeAcp.authMethods.join(', ') : '(none reported)'}`,
+      `claude_acp_cli: ${claudeAcp.cliPath || '(not found)'}`,
+      ...(claudeAcp.lastInitError ? [`claude_acp_last_init_error: ${claudeAcp.lastInitError}`] : []),
+      ...(claudeAcp.lastResumeSkipReason ? [`claude_acp_last_resume_skip: ${claudeAcp.lastResumeSkipReason}`] : []),
+      ...(claudeAcp.lastPermissionDecision ? [`claude_acp_last_permission: ${claudeAcp.lastPermissionDecision}`] : []),
+      ...(claudeAcp.lastStopReason ? [`claude_acp_last_stop_reason: ${claudeAcp.lastStopReason}`] : []),
       `opencode_acp: ${opencodeAcp.initialized ? 'initialized' : 'lazy'}`,
       `opencode_agent: ${[opencodeAcp.agentName, opencodeAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
       `opencode_auth_methods: ${opencodeAcp.authMethods?.length ? opencodeAcp.authMethods.join(', ') : '(none reported)'}`,
@@ -681,9 +685,14 @@ export class RuntimeController {
       ...(opencodeAcp.lastResumeSkipReason ? [`opencode_last_resume_skip: ${opencodeAcp.lastResumeSkipReason}`] : []),
       ...(opencodeAcp.lastPermissionDecision ? [`opencode_last_permission: ${opencodeAcp.lastPermissionDecision}`] : []),
       ...(opencodeAcp.lastStopReason ? [`opencode_last_stop_reason: ${opencodeAcp.lastStopReason}`] : []),
-      `pi_cli: ${piCli.cliPath || '(not found)'}`,
-      `pi_version: ${piCli.cliVersion || 'unknown'}`,
-      ...(piCli.lastInitError ? [`pi_last_init_error: ${piCli.lastInitError}`] : []),
+      `pi_acp: ${piAcp.initialized ? 'initialized' : 'lazy'}`,
+      `pi_acp_agent: ${[piAcp.agentName, piAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
+      `pi_acp_auth_methods: ${piAcp.authMethods?.length ? piAcp.authMethods.join(', ') : '(none reported)'}`,
+      `pi_acp_cli: ${piAcp.cliPath || '(not found)'}`,
+      ...(piAcp.lastInitError ? [`pi_acp_last_init_error: ${piAcp.lastInitError}`] : []),
+      ...(piAcp.lastResumeSkipReason ? [`pi_acp_last_resume_skip: ${piAcp.lastResumeSkipReason}`] : []),
+      ...(piAcp.lastPermissionDecision ? [`pi_acp_last_permission: ${piAcp.lastPermissionDecision}`] : []),
+      ...(piAcp.lastStopReason ? [`pi_acp_last_stop_reason: ${piAcp.lastStopReason}`] : []),
     ].join('\n');
   }
 
@@ -819,12 +828,12 @@ export class RuntimeController {
       return `已切到 ${backendLabel(BACKEND_OPENCODE_ACP)}（已清空旧会话）`;
     }
     if (normalized === BACKEND_CLAUDE) {
-      this.store.setChatCommandPrefix(chatId, this.config.claudeCommandPrefix || 'claude');
+      this.store.setChatCommandPrefix(chatId, this.config.claudeCommandPrefix || 'claude-agent-acp');
       this.store.clearChatSession(chatId);
       return `已切到 ${backendLabel(BACKEND_CLAUDE)}（已清空旧会话）`;
     }
     if (normalized === BACKEND_PI) {
-      this.store.setChatCommandPrefix(chatId, this.config.piCommandPrefix || 'pi --mode json');
+      this.store.setChatCommandPrefix(chatId, this.config.piCommandPrefix || 'pi-acp');
       this.store.clearChatSession(chatId);
       return `已切到 ${backendLabel(BACKEND_PI)}（已清空旧会话）`;
     }
@@ -968,7 +977,7 @@ export class RuntimeController {
     if (['list', 'ls'].includes(sub)) {
       const jobs = this.store.listJobs(chatId);
       if (!jobs.length) return 'No scheduled jobs for this chat';
-      return ['Scheduled Jobs', ...jobs.slice(0, 10).map((job) => `${job.id} [${job.enabled ? 'enabled' : 'paused'}] ${job.schedule_type} ${job.schedule_expr} tz=${job.timezone}`)].join('\n');
+      return ['Scheduled Jobs', ...jobs.map((job) => `${job.id} [${job.enabled ? 'enabled' : 'paused'}] ${job.schedule_type} ${job.schedule_expr} tz=${job.timezone}`)].join('\n');
     }
     if (['show', 'get'].includes(sub)) {
       if (!rest) return 'Usage\n/schedule show <job_id>';
@@ -1171,7 +1180,10 @@ export class RuntimeController {
       });
 
       const backend = detectBackend(commandPrefix);
-      const provider = this.backendProvider(backend);
+      if ((backend === BACKEND_CODEX || backend === BACKEND_CLAUDE || backend === BACKEND_PI) && !isAcpCommandPrefix(commandPrefix, backend)) {
+        throw new Error(`Legacy ${backend} command prefixes are no longer supported. Please switch to ${defaultCommandPrefixForBackend(this.config, backend)}.`);
+      }
+      const provider = this.backendProvider(backend, commandPrefix);
       if (!provider) {
         throw new Error(`Unsupported backend for command prefix: ${commandPrefix}`);
       }

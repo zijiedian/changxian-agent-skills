@@ -69,6 +69,20 @@ function normalizeWorkdirValue(workdir, { defaultWorkdir, legacyPrefixes = [] })
   return resolved;
 }
 
+function normalizeCommandPrefixValue(prefix, {
+  codexCommandPrefix = 'codex-acp',
+  claudeCommandPrefix = 'claude-agent-acp',
+  piCommandPrefix = 'pi-acp',
+} = {}) {
+  const raw = String(prefix || '').trim();
+  if (!raw) return raw;
+  const first = path.basename(raw.split(/\s+/, 1)[0] || '').toLowerCase();
+  if (first === 'codex' || first === 'codex.exe') return String(codexCommandPrefix);
+  if (first === 'claude' || first === 'claude.exe') return String(claudeCommandPrefix);
+  if (first === 'pi' || first === 'pi.exe') return String(piCommandPrefix);
+  return raw;
+}
+
 export class StateStore {
   constructor(stateDir) {
     this.stateDir = stateDir;
@@ -165,6 +179,33 @@ export class StateStore {
       const nextWorkdir = normalize(row.workdir);
       if (nextWorkdir === row.workdir) continue;
       this.updateJob(row.chat_id, row.id, { workdir: nextWorkdir });
+    }
+  }
+
+  normalizeLegacyCommandPrefixes({
+    codexCommandPrefix = 'codex-acp',
+    claudeCommandPrefix = 'claude-agent-acp',
+    piCommandPrefix = 'pi-acp',
+  } = {}) {
+    const normalize = (value) => normalizeCommandPrefixValue(value, {
+      codexCommandPrefix,
+      claudeCommandPrefix,
+      piCommandPrefix,
+    });
+
+    const chatRows = this.db.prepare('SELECT chat_id, prefix FROM chat_command_prefixes').all();
+    for (const row of chatRows) {
+      const nextPrefix = normalize(row.prefix);
+      if (nextPrefix === row.prefix) continue;
+      this.setChatCommandPrefix(row.chat_id, nextPrefix);
+    }
+
+    const jobRows = this.db.prepare('SELECT id, chat_id, command_prefix FROM scheduled_jobs').all();
+    for (const row of jobRows) {
+      const nextPrefix = normalize(row.command_prefix);
+      if (nextPrefix === row.command_prefix) continue;
+      this.db.prepare('UPDATE scheduled_jobs SET command_prefix = ?, updated_at = ? WHERE chat_id = ? AND id = ?')
+        .run(nextPrefix, nowTs(), String(row.chat_id), String(row.id));
     }
   }
 

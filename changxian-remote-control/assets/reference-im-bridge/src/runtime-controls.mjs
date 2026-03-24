@@ -1,4 +1,4 @@
-import { BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_OPENCODE_ACP, BACKEND_PI } from './backend-detection.mjs';
+import { BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_OPENCODE_ACP, BACKEND_PI, isAcpCommandPrefix } from './backend-detection.mjs';
 import { splitShellArgs } from './utils.mjs';
 
 export const CODEX_PERMISSION_LEVELS = ['readonly', 'low', 'high'];
@@ -102,6 +102,16 @@ export function claudePermissionLabel(level = 'custom') {
 }
 
 export function buildRuntimeControlState(backend, commandPrefix, config = {}) {
+  if (isAcpCommandPrefix(commandPrefix, backend)) {
+    return {
+      backend,
+      permissionKind: `${backend}-acp`,
+      permissionLevel: 'managed',
+      permissionLabel: '后端控制',
+      permissionOptions: [],
+    };
+  }
+
   if (backend === BACKEND_CODEX) {
     const permissionLevel = detectCodexPermissionLevel(commandPrefix);
     return {

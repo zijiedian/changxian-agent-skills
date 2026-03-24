@@ -37,7 +37,7 @@ export function codexHome() {
 export function defaultStateDir() {
   return process.env.RC_STATE_DIR?.trim()
     ? path.resolve(process.env.RC_STATE_DIR.trim())
-    : path.join(codexHome(), 'changxian-agent', 'remote-control-js');
+    : path.join(codexHome(), 'changxian-agent', 'remote-control');
 }
 
 export function loadConfig() {
@@ -49,10 +49,10 @@ export function loadConfig() {
   const tgDefaultChannel = String(process.env.TG_DEFAULT_CHANNEL || '').trim();
   const tgChannelAllowedOperatorIds = normalizeTelegramChannelAllowlist(firstEnv('TG_CHANNEL_ALLOWED_OPERATOR_IDS'));
   const defaultBackend = normalizeBackendAlias(process.env.RC_DEFAULT_BACKEND, BACKEND_CODEX);
-  const codexCommandPrefix = String(process.env.CODEX_COMMAND_PREFIX || 'codex -a never --search exec -s danger-full-access --skip-git-repo-check').trim();
+  const codexCommandPrefix = String(process.env.CODEX_COMMAND_PREFIX || 'codex-acp').trim();
   const opencodeCommandPrefix = String(process.env.OPENCODE_ACP_COMMAND_PREFIX || 'opencode acp').trim();
-  const claudeCommandPrefix = String(process.env.RC_CLAUDE_COMMAND_PREFIX || 'claude').trim();
-  const piCommandPrefix = String(process.env.RC_PI_COMMAND_PREFIX || 'pi --mode json').trim();
+  const claudeCommandPrefix = String(process.env.RC_CLAUDE_COMMAND_PREFIX || 'claude-agent-acp').trim();
+  const piCommandPrefix = String(process.env.RC_PI_COMMAND_PREFIX || 'pi-acp').trim();
   return {
     stateDir,
     host: String(process.env.RC_HOST || '0.0.0.0').trim(),
@@ -67,6 +67,8 @@ export function loadConfig() {
     wecomBotId: String(process.env.WECOM_BOT_ID || '').trim(),
     wecomBotSecret: String(process.env.WECOM_BOT_SECRET || '').trim(),
     wecomWsUrl: String(process.env.WECOM_WEBSOCKET_URL || 'wss://openws.work.weixin.qq.com').trim(),
+    weixinEnabled: !['0', 'false', 'no'].includes(String(process.env.WEIXIN_ENABLED || '').toLowerCase()) && Boolean(String(process.env.WEIXIN_ENABLED || '').trim()),
+    weixinAccountId: String(process.env.WEIXIN_ACCOUNT_ID || '').trim(),
     defaultBackend,
     codexCommandPrefix,
     claudeCommandPrefix,
@@ -76,7 +78,6 @@ export function loadConfig() {
     codexTimeoutSeconds: Number.parseInt(process.env.CODEX_TIMEOUT_SECONDS || '21600', 10),
     opencodeTimeoutSeconds: Number.parseInt(process.env.OPENCODE_ACP_TIMEOUT_SECONDS || '21600', 10),
     piTimeoutSeconds: Number.parseInt(process.env.RC_PI_TIMEOUT_SECONDS || '21600', 10),
-    piExecutable: String(process.env.RC_PI_EXECUTABLE || '').trim(),
     defaultTimezone: String(process.env.RC_DEFAULT_TIMEZONE || 'Asia/Shanghai').trim(),
     defaultWorkdir: path.resolve(String(process.env.RC_DEFAULT_WORKDIR || process.cwd()).trim() || process.cwd()),
     maxBufferedOutputChars: Number.parseInt(process.env.RC_MAX_BUFFERED_OUTPUT_CHARS || '200000', 10),

@@ -16,6 +16,36 @@ test('runCommandPreflight recognizes opencode acp backend', () => {
   assert.equal(result.backend, 'opencode-acp');
 });
 
+test('runCommandPreflight recognizes codex acp backend', () => {
+  const result = runCommandPreflight({
+    commandPrefix: 'codex-acp',
+    workdir: os.tmpdir(),
+    includeAuthProbe: false,
+  });
+
+  assert.equal(result.backend, 'codex');
+});
+
+test('runCommandPreflight recognizes claude agent acp backend', () => {
+  const result = runCommandPreflight({
+    commandPrefix: 'claude-agent-acp',
+    workdir: os.tmpdir(),
+    includeAuthProbe: false,
+  });
+
+  assert.equal(result.backend, 'claude');
+});
+
+test('runCommandPreflight recognizes pi acp backend', () => {
+  const result = runCommandPreflight({
+    commandPrefix: 'pi-acp',
+    workdir: os.tmpdir(),
+    includeAuthProbe: false,
+  });
+
+  assert.equal(result.backend, 'pi');
+});
+
 test('runCommandPreflight recognizes npx opencode acp backend', () => {
   const result = runCommandPreflight({
     commandPrefix: 'npx -y opencode-ai acp',

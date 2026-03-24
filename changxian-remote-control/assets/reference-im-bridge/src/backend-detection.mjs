@@ -17,9 +17,22 @@ function isOpencodePackageToken(token) {
   return normalized === 'opencode' || normalized === '.opencode' || normalized === 'opencode-ai';
 }
 
+function isCodexAcpToken(token) {
+  return normalizeToken(token) === 'codex-acp';
+}
+
+function isClaudeAcpToken(token) {
+  const normalized = normalizeToken(token);
+  return normalized === 'claude-agent-acp' || normalized === 'claude-code-acp';
+}
+
 function isPiPackageToken(token) {
   const normalized = normalizeToken(token);
   return normalized === 'pi' || normalized === 'pi-coding-agent' || normalized === '@mariozechner/pi-coding-agent';
+}
+
+function isPiAcpToken(token) {
+  return normalizeToken(token) === 'pi-acp';
 }
 
 export function detectBackendFromArgs(args = []) {
@@ -27,6 +40,9 @@ export function detectBackendFromArgs(args = []) {
   if (!tokens.length) return BACKEND_UNSUPPORTED;
 
   const base = normalizeToken(tokens[0]);
+  if (isCodexAcpToken(tokens[0])) return BACKEND_CODEX;
+  if (isClaudeAcpToken(tokens[0])) return BACKEND_CLAUDE;
+  if (isPiAcpToken(tokens[0])) return BACKEND_PI;
   if (base === 'codex') return BACKEND_CODEX;
   if (base === 'claude') return BACKEND_CLAUDE;
   if (base === 'pi') return BACKEND_PI;
@@ -54,6 +70,28 @@ export function detectBackend(commandPrefix = '') {
   return detectBackendFromArgs(splitShellArgs(commandPrefix));
 }
 
+export function isAcpCommandPrefix(commandPrefix = '', backend = detectBackend(commandPrefix)) {
+  const args = splitShellArgs(commandPrefix);
+  if (!args.length) return false;
+  if (backend === BACKEND_CODEX) return isCodexAcpToken(args[0]);
+  if (backend === BACKEND_CLAUDE) return isClaudeAcpToken(args[0]);
+  if (backend === BACKEND_PI) return isPiAcpToken(args[0]);
+  if (backend === BACKEND_OPENCODE_ACP) return true;
+  return false;
+}
+
+export function preferredAcpCommandPrefix(config = {}, backend = BACKEND_CODEX) {
+  if (backend === BACKEND_CODEX) return String(config.codexCommandPrefix || 'codex-acp').trim();
+  if (backend === BACKEND_CLAUDE) return String(config.claudeCommandPrefix || 'claude-agent-acp').trim();
+  if (backend === BACKEND_PI) return String(config.piCommandPrefix || 'pi-acp').trim();
+  if (backend === BACKEND_OPENCODE_ACP) return String(config.opencodeCommandPrefix || 'opencode acp').trim();
+  return '';
+}
+
+export function normalizePreferredCommandPrefix(commandPrefix = '', config = {}) {
+  return String(commandPrefix || '').trim();
+}
+
 export function normalizeBackendAlias(value, fallback = BACKEND_UNSUPPORTED) {
   const normalized = String(value || '').trim().toLowerCase();
   if (!normalized) return fallback;
@@ -66,16 +104,13 @@ export function normalizeBackendAlias(value, fallback = BACKEND_UNSUPPORTED) {
 }
 
 export function defaultCommandPrefixForBackend(config = {}, backend = BACKEND_CODEX) {
-  if (backend === BACKEND_OPENCODE_ACP) return String(config.opencodeCommandPrefix || 'opencode acp').trim();
-  if (backend === BACKEND_CLAUDE) return String(config.claudeCommandPrefix || 'claude').trim();
-  if (backend === BACKEND_PI) return String(config.piCommandPrefix || 'pi --mode json').trim();
-  return String(config.codexCommandPrefix || '').trim();
+  return preferredAcpCommandPrefix(config, backend);
 }
 
 export function backendLabel(backend = BACKEND_UNSUPPORTED) {
-  if (backend === BACKEND_CODEX) return 'Codex SDK';
+  if (backend === BACKEND_CODEX) return 'Codex ACP';
   if (backend === BACKEND_OPENCODE_ACP) return 'OpenCode ACP';
-  if (backend === BACKEND_CLAUDE) return 'Claude SDK';
-  if (backend === BACKEND_PI) return 'Pi CLI';
+  if (backend === BACKEND_CLAUDE) return 'Claude ACP';
+  if (backend === BACKEND_PI) return 'Pi ACP';
   return 'Unsupported';
 }

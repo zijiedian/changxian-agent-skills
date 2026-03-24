@@ -4,7 +4,7 @@ import os from 'node:os';
 
 import { RuntimeController } from '../src/controller.mjs';
 
-const DEFAULT_COMMAND_PREFIX = 'codex -a never --search exec -s danger-full-access --skip-git-repo-check';
+const DEFAULT_COMMAND_PREFIX = 'codex-acp';
 
 function createConfig() {
   return {
@@ -182,6 +182,55 @@ test('switching backend clears incompatible saved chat sessions', () => {
   const controller = new RuntimeController(createConfig(), store);
 
   const message = controller.applyBackendSelection('chat-1', 'pi');
-  assert.match(message, /Pi CLI/);
+  assert.match(message, /Pi ACP/);
   assert.equal(cleared, 1);
+});
+
+test('runTask rejects legacy non-ACP codex prefixes', async () => {
+  const controller = createController();
+  const sink = createSink();
+
+  const result = await controller.runTask({
+    host: 'telegram',
+    chatId: 'chat-1',
+    externalChatId: 'chat-1',
+    externalUserId: 'user-1',
+    text: 'hello',
+  }, sink, {
+    hostName: 'telegram',
+    taskHost: 'telegram',
+    commandPrefix: 'codex -a never --search exec -s danger-full-access --skip-git-repo-check',
+  });
+
+  assert.equal(result.success, false);
+  assert.match(result.errorText || '', /Legacy codex command prefixes are no longer supported/);
+});
+
+test('handleSettingCommand uses ACP naming consistently', () => {
+  const controller = createController();
+  const output = controller.handleSettingCommand();
+
+  assert.match(output, /codex_acp:/);
+  assert.match(output, /claude_acp:/);
+  assert.match(output, /pi_acp:/);
+  assert.doesNotMatch(output, /codex_sdk:/);
+  assert.doesNotMatch(output, /claude_sdk:/);
+  assert.doesNotMatch(output, /pi_cli:/);
+});
+
+test('handleScheduleCommand list returns all jobs without truncation', async () => {
+  const store = createStore();
+  store.listJobs = () => Array.from({ length: 11 }, (_, index) => ({
+    id: `job-${index + 1}`,
+    enabled: true,
+    schedule_type: 'cron',
+    schedule_expr: `${index} 9 * * *`,
+    timezone: 'Asia/Shanghai',
+  }));
+
+  const controller = new RuntimeController(createConfig(), store);
+  const output = await controller.handleScheduleCommand('chat-1', 'list');
+
+  assert.match(output, /job-1 \[enabled\]/);
+  assert.match(output, /job-11 \[enabled\]/);
 });

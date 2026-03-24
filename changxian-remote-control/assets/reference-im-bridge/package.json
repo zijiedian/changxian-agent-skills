@@ -1,5 +1,5 @@
 {
-  "name": "changxian-remote-control-js",
+  "name": "changxian-remote-control",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,11 +9,10 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.16.1",
-    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
-    "@openai/codex-sdk": "^0.114.0",
     "@wecom/aibot-node-sdk": "1.0.1",
     "better-sqlite3": "^12.4.1",
     "dotenv": "^16.6.1",
-    "grammy": "^1.41.1"
+    "grammy": "^1.41.1",
+    "weixin-agent-sdk": "^0.1.0"
   }
 }

@@ -14,11 +14,12 @@ import { buildPreviewSummaryMarkdown, buildStructuredPreview, previewHasProgress
 
 const TELEGRAM_EDIT_RETRY_DELAY_MS = 800;
 const TELEGRAM_PROGRESS_EDIT_INTERVAL_MS = 1000;
-const TELEGRAM_PROGRESS_APPEND_MARKDOWN_LIMIT = 2600;
 const TELEGRAM_STANDALONE_FINAL_MIN_ELAPSED_SECONDS = 8;
 const TELEGRAM_STANDALONE_FINAL_MIN_PROGRESS_UPDATES = 3;
 const TELEGRAM_COMMAND_SYNC_TTL_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_COMMAND_SYNC_RETRY_MS = 60 * 1000;
+const TELEGRAM_MAX_DRAFT_ID = 2147483646;
+const TELEGRAM_DRAFT_ASSISTANT_FLUSH_CHARS = 24;
 
 function telegramErrorText(error) {
   return error?.description || error?.error?.description || error?.message || error?.error?.message || String(error);
@@ -35,6 +36,99 @@ function isTransientEditError(reason) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function draftDebugEnabled() {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env.TG_DRAFT_DEBUG || '').trim().toLowerCase());
+}
+
+function draftDebug(event, details = {}) {
+  if (!draftDebugEnabled()) return;
+  try {
+    console.info(`[telegram:draft] ${event} ${JSON.stringify(details)}`);
+  } catch {
+    console.info(`[telegram:draft] ${event}`);
+  }
+}
+
+function canUseDraftStreaming(chatId) {
+  const value = String(chatId || '').trim();
+  if (!value || value.startsWith('@')) return false;
+  const numeric = Number.parseInt(value, 10);
+  return Number.isFinite(numeric) && numeric !== 0;
+}
+
+function randomDraftId() {
+  return crypto.randomInt(1, TELEGRAM_MAX_DRAFT_ID);
+}
+
+function threadIdFromContext(ctx) {
+  const candidate = ctx?.message?.message_thread_id ?? ctx?.msg?.message_thread_id ?? ctx?.callbackQuery?.message?.message_thread_id;
+  const value = Number(candidate);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function mergeDraftHtml(previous, next) {
+  const left = String(previous || '').trim();
+  const right = String(next || '').trim();
+  if (!left) return right;
+  if (!right) return left;
+  if (left === right) return left;
+  if (right.includes(left)) return right;
+  if (left.includes(right)) return left;
+
+  const leftLines = left.split('\n');
+  const rightLines = right.split('\n');
+  if (leftLines[0] && leftLines[0] === rightLines[0]) {
+    const suffix = rightLines.slice(1).join('\n').trim();
+    if (!suffix) return left;
+    if (left.includes(suffix)) return left;
+    return `${left}\n${suffix}`.trim();
+  }
+
+  return `${left}\n\n${right}`.trim();
+}
+
+function appendAssistantDraftText(previous, chunk) {
+  const left = String(previous || '');
+  const right = String(chunk || '');
+  if (!left) return right;
+  if (!right) return left;
+  return `${left}${right}`;
+}
+
+function buildDraftDisplayText({ intent = '', progress = '', assistant = '', placeholder = '' } = {}) {
+  const plan = String(intent || '').trim();
+  const progressBody = String(progress || '').trim();
+  const assistantBody = String(assistant || '').trim();
+  const placeholderBody = String(placeholder || '').trim();
+
+  if (assistantBody) {
+    if (plan) return `计划：${plan}\n\n${assistantBody}`.trim();
+    return assistantBody;
+  }
+  if (progressBody) {
+    if (plan && !progressBody.includes(plan)) return `计划：${plan}\n\n${progressBody}`.trim();
+    return progressBody;
+  }
+  if (plan) return `计划：${plan}`;
+  return placeholderBody;
+}
+
+function draftTextFromMarkdown(text) {
+  return String(text || '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/`{3,}[\w-]*\n?/g, '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/\|\|([^|]+)\|\|/g, '$1')
+    .replace(/^\s*[-*+]\s+/gm, '• ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function escapeHtml(value) {
@@ -107,11 +201,53 @@ function progressHeading(preview) {
   return '';
 }
 
-function normalizeProgressText(value) {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
+function fallbackProgressSummary(preview, previewText, marker = '') {
+  const summary = String(preview?.summary || '').trim();
+  if (summary) return summary;
+
+  const commandPreviewLines = Array.isArray(preview?.commandPreviewLines) ? preview.commandPreviewLines : [];
+  const commandPreview = String(preview?.commandPreview || commandPreviewLines[commandPreviewLines.length - 1] || '').trim();
+  if (commandPreview) return truncateText(commandPreview, 120);
+
+  const inlineText = truncateText(String(previewText || '').trim(), 120);
+  if (inlineText) return inlineText;
+
+  if (preview?.phase === 'thinking') return '思考中';
+  if (preview?.phase === 'diff') return '整理变更中';
+  if (preview?.phase === 'research') return '检索资料中';
+  if (String(marker || '').trim().toLowerCase() === 'exec') return '执行中';
+  return '请稍候';
+}
+
+function buildLatestProgressMarkdown(preview, previewText, marker = '') {
+  const heading = progressHeading(preview);
+  const summary = fallbackProgressSummary(preview, previewText, marker);
+  const markdown = buildPreviewSummaryMarkdown(preview, {
+    heading,
+    maxHighlights: 1,
+    maxChecks: 0,
+    maxFiles: 0,
+    maxNotes: 0,
+    includeDiffHint: false,
+    showOverflowCounts: false,
+  }).trim();
+  if (markdown) return markdown;
+
+  if (heading && summary && summary !== heading) {
+    return `**${heading}**\n\n${summary}`.trim();
+  }
+  return heading ? `**${heading}**` : summary;
+}
+
+
+function draftLineFromEntry(entry, payload) {
+  const summary = String(entry?.summary || payload?.text || '').trim();
+  const checks = Array.isArray(payload?.preview?.checks) ? payload.preview.checks : Array.isArray(entry?.preview?.checks) ? entry.preview.checks : [];
+  const firstCheck = String(checks[0] || '').trim();
+  if (summary && firstCheck && !summary.includes(firstCheck)) return `${summary} · ${firstCheck}`;
+  if (summary) return summary;
+  if (firstCheck) return firstCheck;
+  return '';
 }
 
 function buildTelegramProgressEntry(payload) {
@@ -143,53 +279,16 @@ function buildTelegramProgressEntry(payload) {
     };
   }
 
-  const heading = progressHeading(preview);
-  const markdown = buildPreviewSummaryMarkdown(preview, {
-    heading,
-    maxHighlights: 1,
-    maxChecks: 1,
-    maxFiles: 2,
-    maxNotes: 0,
-    includeDiffHint: false,
-  }).trim() || [heading ? `**${heading}**` : '', truncateText(previewText, 180)].filter(Boolean).join('\n').trim();
+  const markdown = buildLatestProgressMarkdown(preview, previewText, marker);
 
   return {
     kind: 'entry',
-    html: coerceTelegramHtml(markdown || truncateText(previewText, 180) || '处理中'),
+    html: coerceTelegramHtml(markdown || '请稍候'),
     marker,
     phase: String(preview?.phase || marker).trim().toLowerCase(),
-    summary: String(preview?.summary || truncateText(previewText, 120) || marker || '处理中').trim(),
+    summary: fallbackProgressSummary(preview, previewText, marker),
     markdown,
   };
-}
-
-function shouldReplaceProgressEntry(lastEntry, nextEntry) {
-  if (!lastEntry || !nextEntry) return false;
-  if (lastEntry.marker !== nextEntry.marker || lastEntry.phase !== nextEntry.phase) return false;
-
-  const previous = normalizeProgressText(lastEntry.summary);
-  const next = normalizeProgressText(nextEntry.summary);
-  if (!previous || !next) return false;
-  if (previous === next) return true;
-  if (previous.startsWith(next) || next.startsWith(previous)) return true;
-  if (nextEntry.marker === 'assistant' || nextEntry.marker === 'thinking') return true;
-  return false;
-}
-
-function buildAppendedProgressHtml(entries) {
-  const parts = (Array.isArray(entries) ? entries : [])
-    .map((entry) => String(entry?.markdown || '').trim())
-    .filter(Boolean);
-  if (!parts.length) return '<i>Thinking...</i>';
-
-  let visible = parts.slice();
-  while (visible.length > 1 && visible.join('\n\n---\n\n').length > TELEGRAM_PROGRESS_APPEND_MARKDOWN_LIMIT) {
-    visible = visible.slice(1);
-  }
-
-  let markdown = visible.join('\n\n---\n\n');
-  if (visible.length < parts.length) markdown = `...\n\n---\n\n${markdown}`;
-  return coerceTelegramHtml(markdown);
 }
 
 async function deleteTelegramMessage({ remove, logPrefix }) {
@@ -273,6 +372,60 @@ async function editTelegramMessage({
   }
 
   if (lastReason) console.warn(logPrefix, lastReason);
+  return { ok: false, mode: 'failed', reason: lastReason };
+}
+
+async function sendTelegramDraft({
+  send,
+  meta = {},
+  fallback = null,
+  logPrefix,
+}) {
+  let lastReason = '';
+  draftDebug('attempt', meta);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await send();
+      draftDebug('success', { ...meta, attempt: attempt + 1 });
+      return { ok: true, mode: 'draft', reason: '' };
+    } catch (error) {
+      const reason = telegramErrorText(error);
+      lastReason = reason;
+      draftDebug('error', { ...meta, attempt: attempt + 1, reason });
+
+      const retryAfter = retryAfterSeconds(reason);
+      if (retryAfter > 0 && attempt === 0 && retryAfter <= 3) {
+        await sleep((retryAfter + 1) * 1000);
+        continue;
+      }
+      if (retryAfter > 0) {
+        if (lastReason) console.warn(logPrefix, lastReason);
+        draftDebug('rate-limited', { ...meta, reason: lastReason, retryAfterSeconds: retryAfter });
+        return { ok: false, mode: 'rate_limited', reason: lastReason, retryAfterSeconds: retryAfter };
+      }
+
+      if (isTransientEditError(reason) && attempt === 0) {
+        await sleep(TELEGRAM_EDIT_RETRY_DELAY_MS);
+        continue;
+      }
+
+      if (fallback) {
+        try {
+          await fallback();
+          draftDebug('fallback-success', { ...meta, attempt: attempt + 1 });
+          return { ok: true, mode: 'fallback', reason };
+        } catch (fallbackError) {
+          lastReason = `draft failed: ${reason}; fallback failed: ${telegramErrorText(fallbackError)}`;
+          draftDebug('fallback-error', { ...meta, attempt: attempt + 1, reason: lastReason });
+        }
+      }
+      break;
+    }
+  }
+
+  if (lastReason) console.warn(logPrefix, lastReason);
+  draftDebug('failed', { ...meta, reason: lastReason });
   return { ok: false, mode: 'failed', reason: lastReason };
 }
 
@@ -710,7 +863,17 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
   let editBackoffUntilMs = 0;
   let lastProgressEditAtMs = 0;
   let progressUpdateCount = 0;
-  const progressEntries = [];
+  let latestProgressEntry = null;
+  let latestIntentSummary = '';
+  let draftStreamingEnabled = canUseDraftStreaming(ctx?.chat?.id);
+  const progressDraftId = randomDraftId();
+  const messageThreadId = threadIdFromContext(ctx);
+  let progressDraftText = '';
+  let assistantDraftText = '';
+  let placeholderDraftText = '';
+  let pendingDraftText = '';
+  let pendingDraftForce = false;
+  let draftRetryTimer = null;
 
   async function sendMessage(html, replyMarkup = undefined) {
     message = await ctx.reply(html, {
@@ -771,6 +934,71 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
     }
   }
 
+  async function upsertProgress(text, { force = false } = {}) {
+    const now = Date.now();
+    if (now < editBackoffUntilMs) return;
+    if (!force && now - lastProgressEditAtMs < TELEGRAM_PROGRESS_EDIT_INTERVAL_MS) {
+      pendingDraftText = text;
+      pendingDraftForce = pendingDraftForce || force;
+      return;
+    }
+
+    if (!draftStreamingEnabled) {
+      return;
+    }
+
+    const result = await sendTelegramDraft({
+      send: () => ctx.api.sendMessageDraft(
+        ctx.chat.id,
+        progressDraftId,
+        text,
+        messageThreadId ? { message_thread_id: messageThreadId } : undefined,
+      ),
+      meta: {
+        chatId: String(ctx.chat.id),
+        messageThreadId: messageThreadId || null,
+        draftId: progressDraftId,
+        textLength: String(text || '').length,
+        textPreview: truncateText(String(text || '').replace(/\s+/g, ' '), 120),
+      },
+      logPrefix: '[telegram] sendMessageDraft failed',
+    });
+
+    if (result.ok) {
+      lastProgressEditAtMs = Date.now();
+      if (pendingDraftText && pendingDraftText !== text) {
+        const nextText = pendingDraftText;
+        pendingDraftText = '';
+        const nextForce = pendingDraftForce;
+        pendingDraftForce = false;
+        await upsertProgress(nextText, { force: nextForce });
+      }
+    } else if (result.mode === 'rate_limited' && result.retryAfterSeconds) {
+      pendingDraftText = text;
+      pendingDraftForce = pendingDraftForce || force;
+      editBackoffUntilMs = Date.now() + (result.retryAfterSeconds * 1000);
+      if (draftRetryTimer) clearTimeout(draftRetryTimer);
+      draftRetryTimer = setTimeout(() => {
+        const nextText = pendingDraftText;
+        const nextForce = pendingDraftForce;
+        pendingDraftText = '';
+        pendingDraftForce = false;
+        draftRetryTimer = null;
+        if (!nextText) return;
+        void upsertProgress(nextText, { force: nextForce });
+      }, (result.retryAfterSeconds + 1) * 1000);
+      draftRetryTimer.unref?.();
+    } else {
+      draftStreamingEnabled = false;
+      pendingDraftText = '';
+      pendingDraftForce = false;
+      if (draftRetryTimer) {
+        clearTimeout(draftRetryTimer);
+        draftRetryTimer = null;
+      }
+    }
+  }
+
   async function sendImages(images) {
     for (const image of images) {
       if (!image?.path || sentImages.has(image.path)) continue;
@@ -789,26 +1017,46 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
     async progress(payload) {
       const entry = buildTelegramProgressEntry(payload);
       if (entry.kind === 'placeholder') {
-        if (!progressEntries.length) {
-          await upsertMessage(entry.html, undefined, { mode: 'progress' });
-          if (message) progressUpdateCount += 1;
+        if (!latestProgressEntry) {
+          placeholderDraftText = draftTextFromMarkdown(entry.html);
+          await upsertProgress(placeholderDraftText);
+          if (draftStreamingEnabled) progressUpdateCount += 1;
         }
         return;
       }
-
-      const lastEntry = progressEntries[progressEntries.length - 1] || null;
-      if (shouldReplaceProgressEntry(lastEntry, entry)) {
-        progressEntries[progressEntries.length - 1] = entry;
+      if (entry.phase === 'thinking') {
+        latestIntentSummary = String(entry.summary || '').trim();
+        assistantDraftText = '';
+        progressDraftText = draftLineFromEntry(entry, payload);
+      } else if (entry.marker === 'assistant' || entry.phase === 'assistant') {
+        assistantDraftText = appendAssistantDraftText(assistantDraftText, String(payload?.text || entry.summary || ''));
+        progressDraftText = '';
       } else {
-        progressEntries.push(entry);
+        assistantDraftText = '';
+        progressDraftText = draftLineFromEntry(entry, payload);
       }
+      latestProgressEntry = entry;
+      placeholderDraftText = '';
 
-      await upsertMessage(
-        buildAppendedProgressHtml(progressEntries),
-        undefined,
-        { mode: 'progress', force: true },
+      const shouldForceFlush = entry.marker !== 'assistant'
+        || entry.phase !== 'assistant'
+        || assistantDraftText.length >= TELEGRAM_DRAFT_ASSISTANT_FLUSH_CHARS;
+
+      const currentDraftText = String(
+        assistantDraftText
+        || progressDraftText
+        || latestIntentSummary
+        || placeholderDraftText
+        || entry.summary
+        || payload?.text
+        || '请稍候'
+      ).trim();
+
+      await upsertProgress(
+        currentDraftText,
+        { force: shouldForceFlush },
       );
-      if (message) progressUpdateCount += 1;
+      if (draftStreamingEnabled) progressUpdateCount += 1;
     },
     async final(payload, options = {}) {
       const rendered = renderTelegramPayload(payload);
@@ -841,6 +1089,7 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
         elapsedSeconds: Number(payload?.elapsedSeconds) || 0,
         progressUpdateCount,
       });
+      console.info(`[telegram] final mode=${shouldSendStandalone ? 'standalone' : 'inline'} pages=${pages.length} images=${rendered.images?.length || 0} reply_markup=${replyMarkup?.inline_keyboard?.length || 0}`);
       if (shouldSendStandalone) {
         const progressMessageId = message?.message_id;
         await sendMessage(pages[0] || rendered.html, replyMarkup);
@@ -887,6 +1136,11 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
   let editBackoffUntilMs = 0;
   let lastProgressEditAtMs = 0;
   let progressUpdateCount = 0;
+  let draftStreamingEnabled = canUseDraftStreaming(chatId);
+  const progressDraftId = randomDraftId();
+  let progressDraftText = '';
+  let pendingDraftText = '';
+  let draftRetryTimer = null;
 
   async function sendMessage(html, replyMarkup = undefined) {
     if (!chatId) return null;
@@ -950,6 +1204,59 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
     }
   }
 
+  async function upsertProgress(text) {
+    if (!chatId) return;
+    const now = Date.now();
+    if (now < editBackoffUntilMs) return;
+    if (now - lastProgressEditAtMs < TELEGRAM_PROGRESS_EDIT_INTERVAL_MS) {
+      pendingDraftText = text;
+      return;
+    }
+
+    if (!draftStreamingEnabled) {
+      return;
+    }
+
+    const result = await sendTelegramDraft({
+      send: () => bot.api.sendMessageDraft(chatId, progressDraftId, text),
+      meta: {
+        chatId,
+        draftId: progressDraftId,
+        textLength: String(text || '').length,
+        textPreview: truncateText(String(text || '').replace(/\s+/g, ' '), 120),
+      },
+      logPrefix: '[telegram] push sendMessageDraft failed',
+    });
+
+    if (result.ok) {
+      lastProgressEditAtMs = Date.now();
+      if (pendingDraftText && pendingDraftText !== text) {
+        const nextText = pendingDraftText;
+        pendingDraftText = '';
+        await upsertProgress(nextText);
+      }
+    } else if (result.mode === 'rate_limited' && result.retryAfterSeconds) {
+      pendingDraftText = text;
+      editBackoffUntilMs = Date.now() + (result.retryAfterSeconds * 1000);
+      if (draftRetryTimer) clearTimeout(draftRetryTimer);
+      draftRetryTimer = setTimeout(() => {
+        const nextText = pendingDraftText;
+        pendingDraftText = '';
+        draftRetryTimer = null;
+        if (!nextText) return;
+        void upsertProgress(nextText);
+      }, (result.retryAfterSeconds + 1) * 1000);
+      draftRetryTimer.unref?.();
+    } else {
+      draftStreamingEnabled = false;
+      pendingDraftText = '';
+      if (draftRetryTimer) {
+        clearTimeout(draftRetryTimer);
+        draftRetryTimer = null;
+      }
+    }
+  }
+
   async function sendImages(images) {
     if (!chatId) return;
     for (const image of images) {
@@ -969,13 +1276,9 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
     async progress(payload) {
       const rendered = renderTelegramPayload(payload);
       const pages = rendered.pages || [rendered.html];
-      const token = rememberPagination(chatId, pages);
-      await upsertMessage(
-        pages[0] || rendered.html,
-        token ? buildPaginationKeyboard(token, 0, pages.length) : undefined,
-        { mode: 'progress' },
-      );
-      if (message) progressUpdateCount += 1;
+      progressDraftText = mergeDraftHtml(progressDraftText, draftTextFromMarkdown(pages[0] || rendered.html));
+      await upsertProgress(progressDraftText);
+      if (draftStreamingEnabled) progressUpdateCount += 1;
     },
     async final(payload) {
       const rendered = renderTelegramPayload(payload);
@@ -990,6 +1293,7 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
         elapsedSeconds: Number(payload?.elapsedSeconds) || 0,
         progressUpdateCount,
       });
+      console.info(`[telegram] push final mode=${shouldSendStandalone ? 'standalone' : 'inline'} pages=${pages.length} images=${rendered.images?.length || 0}`);
       if (shouldSendStandalone) {
         const progressMessageId = message?.message_id;
         await sendMessage(pages[0] || rendered.html, replyMarkup);

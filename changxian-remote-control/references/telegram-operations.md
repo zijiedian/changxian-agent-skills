@@ -13,7 +13,7 @@
 
 - `/cwd <path>` changes the working directory.
 - `/cmd low|readonly|high` switches the Codex permission tier when the chat uses the Codex backend.
-- `/cmd <custom-prefix>` can point the current chat at `claude`, `pi --mode json`, `opencode acp`, or `npx -y opencode-ai acp`.
+- `/cmd <custom-prefix>` can point the current chat at `claude-agent-acp`, `pi-acp`, `opencode acp`, or `npx -y opencode-ai acp`.
 - `/backend claude|codex|opencode-acp|pi|default` switches the execution backend for the current chat.
 - `/skill list|enable|disable` inspects or toggles system skills.
 - `/mcp list|enable|disable` inspects or toggles MCP servers.
@@ -21,36 +21,34 @@
 - `/setting memory on|off` toggles memory injection.
 - `/setting scheduler on|off` toggles the scheduler.
 
-## Claude SDK
+## Claude ACP
 
-- Install and authenticate Claude Code with `claude auth login`.
-- Use `/backend claude` to switch the current chat to Claude SDK.
-- Set `RC_DEFAULT_BACKEND=claude` to make Claude SDK the bridge default.
-- Set `RC_CLAUDE_COMMAND_PREFIX=claude --permission-mode acceptEdits` to change Claude permission behavior.
-- Set `RC_CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude` when the `claude` binary is not on `PATH`.
+- Install and authenticate Claude ACP with `npm install -g @zed-industries/claude-agent-acp` plus `claude auth login`.
+- Use `/backend claude` to switch the current chat to Claude ACP.
+- Set `RC_DEFAULT_BACKEND=claude` to make Claude ACP the bridge default.
+- Set `RC_CLAUDE_COMMAND_PREFIX=claude-agent-acp` to change the Claude ACP executable or wrapping command.
 
 See `references/claude-backend.md` for the full backend-specific setup and behavior notes.
 
 ## OpenCode ACP
 
-- Use `/backend claude` to switch away from Claude SDK when needed.
+- Use `/backend claude` to switch away from Claude ACP when needed.
 - Install and authenticate OpenCode with `opencode auth login`.
 - Use `/backend opencode-acp` to switch the current chat to OpenCode ACP.
-- Use `/backend codex` to switch back to the Codex SDK backend.
+- Use `/backend codex` to switch back to the Codex ACP backend.
 - Set `RC_DEFAULT_BACKEND=opencode-acp` to make OpenCode ACP the bridge default.
 - Set `OPENCODE_ACP_COMMAND_PREFIX=npx -y opencode-ai acp` when the global `opencode` binary is unavailable.
 - When OpenCode asks for tool approval, Telegram now renders the ACP permission options as inline buttons instead of auto-approving `allow_once`.
 
 See `references/opencode-acp.md` for the full backend-specific setup and behavior notes.
 
-## Pi CLI
+## Pi ACP
 
-- Install Pi with `npm install -g @mariozechner/pi-coding-agent`.
-- Use `/backend pi` to switch the current chat to Pi CLI.
+- Install Pi ACP with `npm install -g pi-acp`.
+- Use `/backend pi` to switch the current chat to Pi ACP.
 - Use `/backend codex` or `/backend claude` to switch away when needed.
 - Set `RC_DEFAULT_BACKEND=pi` to make Pi the bridge default.
-- Set `RC_PI_COMMAND_PREFIX="pi --mode json --provider anthropic --model sonnet"` when you want Pi pinned to a specific provider or model.
-- Set `RC_PI_EXECUTABLE=/absolute/path/to/pi` when the `pi` binary is not on `PATH`.
+- Set `RC_PI_COMMAND_PREFIX=pi-acp` to change the Pi ACP executable or wrapping command.
 
 See `references/pi-backend.md` for the full backend-specific setup and behavior notes.
 

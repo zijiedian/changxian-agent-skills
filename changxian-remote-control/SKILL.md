@@ -119,8 +119,8 @@ Resolve relative paths against this skill directory, not the current runtime wor
 - `references/telegram-operations.md` for day-to-day Telegram operations including channel publishing.
 - `references/memory-autosave.md` for the auto memory extraction rules, merge heuristics, and safe examples.
 - `references/opencode-acp.md` for switching the bridge to OpenCode ACP and configuring the ACP command prefix.
-- `references/pi-backend.md` for switching the bridge to Pi CLI and configuring the Pi command prefix.
-- `references/claude-backend.md` for switching to Claude SDK backend and configuring the Claude command prefix.
+- `references/pi-backend.md` for switching the bridge to Pi ACP and configuring the Pi command prefix.
+- `references/claude-backend.md` for switching to Claude ACP backend and configuring the Claude command prefix.
 - `references/wecom-adapter-example.md` for one WeCom intelligent robot profile.
 - `references/standalone-install.md` for the JavaScript standalone runtime layout and startup flow.
 
