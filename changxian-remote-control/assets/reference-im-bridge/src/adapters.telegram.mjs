@@ -13,13 +13,13 @@ import { buildCommandPanelKeyboard } from './telegram-command-panels.mjs';
 import { buildPreviewSummaryMarkdown, buildStructuredPreview, previewHasProgressDetails, truncateText } from './utils.mjs';
 
 const TELEGRAM_EDIT_RETRY_DELAY_MS = 800;
-const TELEGRAM_PROGRESS_EDIT_INTERVAL_MS = 1000;
+const TELEGRAM_PROGRESS_EDIT_INTERVAL_MS = 2000;
 const TELEGRAM_STANDALONE_FINAL_MIN_ELAPSED_SECONDS = 8;
 const TELEGRAM_STANDALONE_FINAL_MIN_PROGRESS_UPDATES = 3;
 const TELEGRAM_COMMAND_SYNC_TTL_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_COMMAND_SYNC_RETRY_MS = 60 * 1000;
 const TELEGRAM_MAX_DRAFT_ID = 2147483646;
-const TELEGRAM_DRAFT_ASSISTANT_FLUSH_CHARS = 24;
+const TELEGRAM_DRAFT_ASSISTANT_FLUSH_CHARS = 48;
 
 function telegramErrorText(error) {
   return error?.description || error?.error?.description || error?.message || error?.error?.message || String(error);
@@ -66,6 +66,15 @@ function threadIdFromContext(ctx) {
   const candidate = ctx?.message?.message_thread_id ?? ctx?.msg?.message_thread_id ?? ctx?.callbackQuery?.message?.message_thread_id;
   const value = Number(candidate);
   return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+export function resolveTelegramChatId(ctx) {
+  const candidate = ctx?.chat?.id
+    ?? ctx?.callbackQuery?.message?.chat?.id
+    ?? ctx?.msg?.chat?.id
+    ?? ctx?.update?.callback_query?.message?.chat?.id;
+  if (candidate == null) return '';
+  return String(candidate);
 }
 
 function mergeDraftHtml(previous, next) {
@@ -142,7 +151,7 @@ function buildPermissionPromptHtml(request) {
   return buildPermissionPromptText(request)
     .split('\n')
     .map((line) => escapeHtml(line))
-    .join('<br/>');
+    .join('\n');
 }
 
 function buildPermissionDecisionHtml(request, decision) {
@@ -150,7 +159,7 @@ function buildPermissionDecisionHtml(request, decision) {
   const summary = decision?.outcome?.outcome === 'selected'
     ? `已选择：${permissionOptionLabel(decision.option)}`
     : '已取消权限请求';
-  return `${base}<br/><br/><b>${escapeHtml(summary)}</b>`;
+  return `${base}\n\n<b>${escapeHtml(summary)}</b>`;
 }
 
 function buildPermissionKeyboard(token, request) {
@@ -528,16 +537,25 @@ export async function startTelegramAdapter(config, controller) {
     );
   }
 
+  bot.on('callback_query:data', async (ctx, next) => {
+    const data = String(ctx.callbackQuery?.data || '');
+    if (data.startsWith('rcperm:')) {
+      console.info(`[telegram] permission callback chat=${resolveTelegramChatId(ctx) || 'unknown'} data=${data}`);
+    }
+    await next();
+  });
+
   bot.callbackQuery(/^rcpage:([^:]+):(\d+)$/, async (ctx) => {
     prunePaginationSessions();
     const token = String(ctx.match?.[1] || '');
     const requestedIndex = Number.parseInt(String(ctx.match?.[2] || '0'), 10);
     const session = paginationSessions.get(token);
+    const chatId = resolveTelegramChatId(ctx);
     if (!session) {
       await ctx.answerCallbackQuery({ text: '分页已失效，请重新执行任务。', show_alert: false }).catch(() => {});
       return;
     }
-    if (session.chatId !== String(ctx.chat?.id || '')) {
+    if (session.chatId !== chatId) {
       await ctx.answerCallbackQuery({ text: '当前消息不属于这个会话。', show_alert: false }).catch(() => {});
       return;
     }
@@ -595,7 +613,8 @@ export async function startTelegramAdapter(config, controller) {
     permissionRegistry.prune();
     const token = String(ctx.match?.[1] || '');
     const action = String(ctx.match?.[2] || '');
-    const chatId = String(ctx.chat?.id || '');
+    const chatId = resolveTelegramChatId(ctx);
+    const entry = permissionRegistry.get(token);
     const result = action === 'cancel'
       ? permissionRegistry.cancel(token, chatId, 'manual-cancel')
       : permissionRegistry.resolveWithOption(token, chatId, Number.parseInt(action, 10));
@@ -606,25 +625,40 @@ export async function startTelegramAdapter(config, controller) {
         : result.reason === 'invalid-option'
           ? '按钮已失效，请重新触发权限请求。'
           : '权限请求已失效，请重新执行任务。';
+      console.warn(`[telegram] permission decision rejected chat=${chatId || 'unknown'} token=${token} action=${action} reason=${result.reason}`);
       await ctx.answerCallbackQuery({ text, show_alert: false }).catch(() => {});
       return;
     }
 
-    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
     const text = action === 'cancel' ? '已取消' : `已选择：${permissionOptionLabel(result.option)}`;
+    console.info(`[telegram] permission decision chat=${chatId} action=${action} text=${text}`);
     await ctx.answerCallbackQuery({ text, show_alert: false }).catch(() => {});
+    if (entry?.request) {
+      const html = buildPermissionDecisionHtml(entry.request, action === 'cancel'
+        ? { outcome: { outcome: 'cancelled' } }
+        : { outcome: { outcome: 'selected' }, option: result.option });
+      await ctx.editMessageText(html, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+        reply_markup: undefined,
+      }).catch(async () => {
+        await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
+      });
+    } else {
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
+    }
   });
 
   bot.callbackQuery(/^rcctl:([^:]+):([^:]+)$/, async (ctx) => {
     const kind = String(ctx.match?.[1] || '');
     const value = String(ctx.match?.[2] || '');
-    const chatId = String(ctx.chat?.id || '');
+    const chatId = resolveTelegramChatId(ctx);
     let notice = '';
     let text = '';
     const request = {
       host: 'telegram',
       chatId,
-      externalChatId: String(ctx.chat?.id || ''),
+      externalChatId: chatId,
       externalUserId: ctx.from ? String(ctx.from.id) : '',
       text: '',
     };
@@ -696,11 +730,11 @@ export async function startTelegramAdapter(config, controller) {
     const kind = String(ctx.match?.[1] || '');
     const action = String(ctx.match?.[2] || '');
     const target = String(ctx.match?.[3] || '');
-    const chatId = String(ctx.chat?.id || '');
+    const chatId = resolveTelegramChatId(ctx);
     const request = {
       host: 'telegram',
       chatId,
-      externalChatId: String(ctx.chat?.id || ''),
+      externalChatId: chatId,
       externalUserId: ctx.from ? String(ctx.from.id) : '',
       text: '',
     };
@@ -814,16 +848,23 @@ export async function startTelegramAdapter(config, controller) {
     void ensureTelegramMenuCommands();
     const text = String(ctx.message.text || '').trim();
     const sink = createTelegramSink(ctx, rememberPagination, buildPaginationKeyboard, permissionRegistry, controller);
-    await controller.handleInput({
-      host: 'telegram',
-      chatId: String(ctx.chat.id),
-      externalChatId: String(ctx.chat.id),
-      externalUserId: ctx.from ? String(ctx.from.id) : '',
-      text,
-    }, sink);
+    void (async () => {
+      try {
+        await controller.handleInput({
+          host: 'telegram',
+          chatId: String(ctx.chat.id),
+          externalChatId: String(ctx.chat.id),
+          externalUserId: ctx.from ? String(ctx.from.id) : '',
+          text,
+        }, sink);
+      } catch (error) {
+        recordError(error, '[telegram] handleInput failed');
+      }
+    })();
   });
 
   bot.start({
+    allowed_updates: ['message', 'callback_query'],
     onStart(me) {
       status.connected = true;
       status.authenticated = true;
@@ -874,6 +915,7 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
   let pendingDraftText = '';
   let pendingDraftForce = false;
   let draftRetryTimer = null;
+  let draftFlushPromise = null;
 
   async function sendMessage(html, replyMarkup = undefined) {
     message = await ctx.reply(html, {
@@ -934,69 +976,72 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
     }
   }
 
-  async function upsertProgress(text, { force = false } = {}) {
-    const now = Date.now();
-    if (now < editBackoffUntilMs) return;
-    if (!force && now - lastProgressEditAtMs < TELEGRAM_PROGRESS_EDIT_INTERVAL_MS) {
-      pendingDraftText = text;
-      pendingDraftForce = pendingDraftForce || force;
-      return;
-    }
+  async function flushPendingDrafts() {
+    if (draftFlushPromise) return draftFlushPromise;
+    draftFlushPromise = (async () => {
+      while (draftStreamingEnabled && pendingDraftText) {
+        const now = Date.now();
+        const waitMs = Math.max(
+          0,
+          editBackoffUntilMs - now,
+          pendingDraftForce ? 0 : (lastProgressEditAtMs + TELEGRAM_PROGRESS_EDIT_INTERVAL_MS) - now,
+        );
+        if (waitMs > 0) {
+          if (draftRetryTimer) clearTimeout(draftRetryTimer);
+          draftRetryTimer = setTimeout(() => {
+            draftRetryTimer = null;
+            void flushPendingDrafts();
+          }, waitMs);
+          draftRetryTimer.unref?.();
+          break;
+        }
 
-    if (!draftStreamingEnabled) {
-      return;
-    }
+        const text = pendingDraftText;
+        pendingDraftText = '';
+        pendingDraftForce = false;
 
-    const result = await sendTelegramDraft({
-      send: () => ctx.api.sendMessageDraft(
-        ctx.chat.id,
-        progressDraftId,
-        text,
-        messageThreadId ? { message_thread_id: messageThreadId } : undefined,
-      ),
-      meta: {
-        chatId: String(ctx.chat.id),
-        messageThreadId: messageThreadId || null,
-        draftId: progressDraftId,
-        textLength: String(text || '').length,
-        textPreview: truncateText(String(text || '').replace(/\s+/g, ' '), 120),
-      },
-      logPrefix: '[telegram] sendMessageDraft failed',
+        const result = await sendTelegramDraft({
+          send: () => ctx.api.sendMessageDraft(
+            ctx.chat.id,
+            progressDraftId,
+            text,
+            messageThreadId ? { message_thread_id: messageThreadId } : undefined,
+          ),
+          meta: {
+            chatId: String(ctx.chat.id),
+            messageThreadId: messageThreadId || null,
+            draftId: progressDraftId,
+            textLength: String(text || '').length,
+            textPreview: truncateText(String(text || '').replace(/\s+/g, ' '), 120),
+          },
+          logPrefix: '[telegram] sendMessageDraft failed',
+        });
+
+        if (result.ok) {
+          lastProgressEditAtMs = Date.now();
+          continue;
+        }
+        if (result.mode === 'rate_limited' && result.retryAfterSeconds) {
+          pendingDraftText = text;
+          editBackoffUntilMs = Date.now() + (result.retryAfterSeconds * 1000);
+          continue;
+        }
+
+        draftStreamingEnabled = false;
+        pendingDraftText = '';
+        pendingDraftForce = false;
+      }
+    })().finally(() => {
+      draftFlushPromise = null;
     });
+    return draftFlushPromise;
+  }
 
-    if (result.ok) {
-      lastProgressEditAtMs = Date.now();
-      if (pendingDraftText && pendingDraftText !== text) {
-        const nextText = pendingDraftText;
-        pendingDraftText = '';
-        const nextForce = pendingDraftForce;
-        pendingDraftForce = false;
-        await upsertProgress(nextText, { force: nextForce });
-      }
-    } else if (result.mode === 'rate_limited' && result.retryAfterSeconds) {
-      pendingDraftText = text;
-      pendingDraftForce = pendingDraftForce || force;
-      editBackoffUntilMs = Date.now() + (result.retryAfterSeconds * 1000);
-      if (draftRetryTimer) clearTimeout(draftRetryTimer);
-      draftRetryTimer = setTimeout(() => {
-        const nextText = pendingDraftText;
-        const nextForce = pendingDraftForce;
-        pendingDraftText = '';
-        pendingDraftForce = false;
-        draftRetryTimer = null;
-        if (!nextText) return;
-        void upsertProgress(nextText, { force: nextForce });
-      }, (result.retryAfterSeconds + 1) * 1000);
-      draftRetryTimer.unref?.();
-    } else {
-      draftStreamingEnabled = false;
-      pendingDraftText = '';
-      pendingDraftForce = false;
-      if (draftRetryTimer) {
-        clearTimeout(draftRetryTimer);
-        draftRetryTimer = null;
-      }
-    }
+  async function upsertProgress(text, { force = false } = {}) {
+    pendingDraftText = text;
+    pendingDraftForce = pendingDraftForce || force;
+    if (!draftStreamingEnabled) return;
+    void flushPendingDrafts();
   }
 
   async function sendImages(images) {
@@ -1010,6 +1055,27 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
       } catch (error) {
         console.warn('[telegram] failed to send image ' + image.path, telegramErrorText(error));
       }
+    }
+  }
+
+  async function finalizeDraftIndicator(text = '已完成') {
+    if (!draftStreamingEnabled) return;
+    try {
+      await ctx.api.sendMessageDraft(
+        ctx.chat.id,
+        progressDraftId,
+        String(text || '已完成').trim() || '已完成',
+        messageThreadId ? { message_thread_id: messageThreadId } : undefined,
+      );
+    } catch {
+      // ignore final draft cleanup failures
+    }
+    draftStreamingEnabled = false;
+    pendingDraftText = '';
+    pendingDraftForce = false;
+    if (draftRetryTimer) {
+      clearTimeout(draftRetryTimer);
+      draftRetryTimer = null;
     }
   }
 
@@ -1059,6 +1125,7 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
       if (draftStreamingEnabled) progressUpdateCount += 1;
     },
     async final(payload, options = {}) {
+      await finalizeDraftIndicator('已完成');
       const rendered = renderTelegramPayload(payload);
       const pages = rendered.pages || [rendered.html];
       const token = rememberPagination(String(ctx.chat.id), pages, {
@@ -1107,6 +1174,7 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
       const pending = permissionRegistry.create(String(ctx.chat.id), request);
       const keyboard = buildPermissionKeyboard(pending.token, request);
       const html = buildPermissionPromptHtml(request);
+      console.info(`[telegram] permission prompt chat=${ctx.chat.id} token=${pending.token}`);
       const abortHandler = () => {
         permissionRegistry.cancel(pending.token, String(ctx.chat.id), 'aborted');
       };
@@ -1115,6 +1183,7 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
       try {
         await upsertMessage(html, keyboard, { mode: 'final' });
         const decision = await pending.promise;
+        console.info(`[telegram] permission resolved chat=${ctx.chat.id} token=${pending.token} outcome=${decision?.outcome?.outcome || 'unknown'} option=${decision?.outcome?.optionId || ''}`);
         await upsertMessage(buildPermissionDecisionHtml(request, decision), undefined, { mode: 'final' });
         return { outcome: decision.outcome };
       } catch (error) {
@@ -1141,6 +1210,7 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
   let progressDraftText = '';
   let pendingDraftText = '';
   let draftRetryTimer = null;
+  let draftFlushPromise = null;
 
   async function sendMessage(html, replyMarkup = undefined) {
     if (!chatId) return null;
@@ -1204,57 +1274,59 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
     }
   }
 
+  async function flushPendingPushDrafts() {
+    if (draftFlushPromise) return draftFlushPromise;
+    draftFlushPromise = (async () => {
+      while (draftStreamingEnabled && pendingDraftText) {
+        const now = Date.now();
+        const waitMs = Math.max(0, editBackoffUntilMs - now, (lastProgressEditAtMs + TELEGRAM_PROGRESS_EDIT_INTERVAL_MS) - now);
+        if (waitMs > 0) {
+          if (draftRetryTimer) clearTimeout(draftRetryTimer);
+          draftRetryTimer = setTimeout(() => {
+            draftRetryTimer = null;
+            void flushPendingPushDrafts();
+          }, waitMs);
+          draftRetryTimer.unref?.();
+          break;
+        }
+
+        const text = pendingDraftText;
+        pendingDraftText = '';
+        const result = await sendTelegramDraft({
+          send: () => bot.api.sendMessageDraft(chatId, progressDraftId, text),
+          meta: {
+            chatId,
+            draftId: progressDraftId,
+            textLength: String(text || '').length,
+            textPreview: truncateText(String(text || '').replace(/\s+/g, ' '), 120),
+          },
+          logPrefix: '[telegram] push sendMessageDraft failed',
+        });
+
+        if (result.ok) {
+          lastProgressEditAtMs = Date.now();
+          continue;
+        }
+        if (result.mode === 'rate_limited' && result.retryAfterSeconds) {
+          pendingDraftText = text;
+          editBackoffUntilMs = Date.now() + (result.retryAfterSeconds * 1000);
+          continue;
+        }
+
+        draftStreamingEnabled = false;
+        pendingDraftText = '';
+      }
+    })().finally(() => {
+      draftFlushPromise = null;
+    });
+    return draftFlushPromise;
+  }
+
   async function upsertProgress(text) {
     if (!chatId) return;
-    const now = Date.now();
-    if (now < editBackoffUntilMs) return;
-    if (now - lastProgressEditAtMs < TELEGRAM_PROGRESS_EDIT_INTERVAL_MS) {
-      pendingDraftText = text;
-      return;
-    }
-
-    if (!draftStreamingEnabled) {
-      return;
-    }
-
-    const result = await sendTelegramDraft({
-      send: () => bot.api.sendMessageDraft(chatId, progressDraftId, text),
-      meta: {
-        chatId,
-        draftId: progressDraftId,
-        textLength: String(text || '').length,
-        textPreview: truncateText(String(text || '').replace(/\s+/g, ' '), 120),
-      },
-      logPrefix: '[telegram] push sendMessageDraft failed',
-    });
-
-    if (result.ok) {
-      lastProgressEditAtMs = Date.now();
-      if (pendingDraftText && pendingDraftText !== text) {
-        const nextText = pendingDraftText;
-        pendingDraftText = '';
-        await upsertProgress(nextText);
-      }
-    } else if (result.mode === 'rate_limited' && result.retryAfterSeconds) {
-      pendingDraftText = text;
-      editBackoffUntilMs = Date.now() + (result.retryAfterSeconds * 1000);
-      if (draftRetryTimer) clearTimeout(draftRetryTimer);
-      draftRetryTimer = setTimeout(() => {
-        const nextText = pendingDraftText;
-        pendingDraftText = '';
-        draftRetryTimer = null;
-        if (!nextText) return;
-        void upsertProgress(nextText);
-      }, (result.retryAfterSeconds + 1) * 1000);
-      draftRetryTimer.unref?.();
-    } else {
-      draftStreamingEnabled = false;
-      pendingDraftText = '';
-      if (draftRetryTimer) {
-        clearTimeout(draftRetryTimer);
-        draftRetryTimer = null;
-      }
-    }
+    pendingDraftText = text;
+    if (!draftStreamingEnabled) return;
+    void flushPendingPushDrafts();
   }
 
   async function sendImages(images) {
@@ -1272,6 +1344,21 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
     }
   }
 
+  async function finalizeDraftIndicator(text = '已完成') {
+    if (!draftStreamingEnabled || !chatId) return;
+    try {
+      await bot.api.sendMessageDraft(chatId, progressDraftId, String(text || '已完成').trim() || '已完成');
+    } catch {
+      // ignore final draft cleanup failures
+    }
+    draftStreamingEnabled = false;
+    pendingDraftText = '';
+    if (draftRetryTimer) {
+      clearTimeout(draftRetryTimer);
+      draftRetryTimer = null;
+    }
+  }
+
   return {
     async progress(payload) {
       const rendered = renderTelegramPayload(payload);
@@ -1281,6 +1368,7 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
       if (draftStreamingEnabled) progressUpdateCount += 1;
     },
     async final(payload) {
+      await finalizeDraftIndicator('已完成');
       const rendered = renderTelegramPayload(payload);
       const pages = rendered.pages || [rendered.html];
       const token = rememberPagination(chatId, pages);
