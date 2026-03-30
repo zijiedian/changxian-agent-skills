@@ -15,6 +15,31 @@ function targetFromBinding(binding) {
   return String(binding.externalUserId || binding.userid || binding.chatid || '').trim();
 }
 
+function renderWeComProgressMessage(message) {
+  const renderedBody = String(message?.rendered?.body || '').trim();
+  if (renderedBody) {
+    return {
+      content: renderedBody,
+      pages: [renderedBody],
+    };
+  }
+  return renderWeComPayload(message);
+}
+
+function previewWeComContent(content, limit = 160) {
+  const normalized = String(content || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '<empty>';
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+function logWeComOutgoing(kind, binding, content, extra = '') {
+  const suffix = extra ? ` ${extra}` : '';
+  console.info(
+    `[wecom] ${kind} chat=${binding?.chatId || '-'} type=${binding?.chattype || '-'} user=${binding?.userid || '-'} len=${String(content || '').length} preview=${JSON.stringify(previewWeComContent(content))}${suffix}`,
+  );
+}
+
 function createWeComPushSink(client, binding) {
   const target = targetFromBinding(binding);
 
@@ -32,6 +57,185 @@ function createWeComPushSink(client, binding) {
         }).catch((error) => {
           console.warn('[wecom] failed to push proactive message', errorText(error));
         });
+      }
+    },
+  };
+}
+
+export function createWeComReplySink(client, frame, binding, status = {}) {
+  const streamId = generateReqId('stream');
+  const finalTarget = targetFromBinding(binding);
+  let finished = false;
+  let finalizing = false;
+  let sendChain = Promise.resolve();
+  let lastProgressContent = '';
+  let lastProgressPhase = '';
+  let lastProgressAt = 0;
+  let streamUnavailable = false;
+  let streamUnavailableReason = '';
+  let fallbackNoticeSent = false;
+  let progressDelivered = false;
+
+  const queueSend = (operation) => {
+    const task = sendChain
+      .catch(() => {})
+      .then(operation);
+    sendChain = task.then(() => undefined, () => undefined);
+    return task;
+  };
+
+  const sendMarkdown = async (content) => {
+    if (!finalTarget) return false;
+    logWeComOutgoing('proactive send', binding, content, `target=${JSON.stringify(finalTarget)}`);
+    try {
+      await client.sendMessage(finalTarget, {
+        msgtype: 'markdown',
+        markdown: { content },
+      });
+      return true;
+    } catch (error) {
+      const reason = errorText(error);
+      status.lastError = reason;
+      console.warn(`[wecom] proactive send failed chat=${binding.chatId} type=${binding.chattype} user=${binding.userid || '-'} reason=${reason}`);
+      return false;
+    }
+  };
+
+  const sendMarkdownPages = async (pages, startIndex = 0, endIndex = pages.length) => {
+    let delivered = startIndex;
+    for (let index = startIndex; index < endIndex; index += 1) {
+      const ok = await sendMarkdown(pages[index]);
+      if (!ok) break;
+      delivered = index + 1;
+    }
+    return delivered;
+  };
+
+  const notifyFallbackMode = async () => {
+    if (fallbackNoticeSent || finalizing || finished || !finalTarget || !progressDelivered) return;
+    fallbackNoticeSent = true;
+    await sendMarkdown('流式进度已中断，任务仍在继续，完成后会补发最终结果。');
+  };
+
+  const sendStream = (content, finish) => {
+    return queueSend(async () => {
+      if ((finalizing || finished) && !finish) return { ok: false, skipped: true };
+      logWeComOutgoing(`stream ${finish ? 'final' : 'progress'}`, binding, content, `streamId=${JSON.stringify(streamId)}`);
+      try {
+        await client.replyStream(frame, streamId, content, finish);
+        if (finish) finished = true;
+        return { ok: true };
+      } catch (error) {
+        const reason = errorText(error);
+        status.lastError = reason;
+        streamUnavailable = true;
+        streamUnavailableReason = reason;
+        console.warn(`[wecom] stream ${finish ? 'final' : 'progress'} failed chat=${binding.chatId} type=${binding.chattype} user=${binding.userid || '-'} reason=${reason}`);
+        return { ok: false, error };
+      }
+    });
+  };
+
+  return {
+    async progress(message) {
+      if (finalizing || finished) return;
+      if (streamUnavailable) {
+        await notifyFallbackMode();
+        return;
+      }
+      const rendered = renderWeComProgressMessage(message);
+      const phase = String(message?.preview?.phase || message?.marker || '').toLowerCase();
+      const now = Date.now();
+      const phaseChanged = phase && phase !== lastProgressPhase;
+      const timeElapsed = now - lastProgressAt;
+      const minIntervalMs = 1000;
+      if (!phaseChanged && rendered.content === lastProgressContent) return;
+      if (!phaseChanged && lastProgressAt > 0 && timeElapsed < minIntervalMs) return;
+      lastProgressContent = rendered.content;
+      lastProgressPhase = phase;
+      lastProgressAt = now;
+      const result = await sendStream(rendered.content, false);
+      if (result?.ok) {
+        progressDelivered = true;
+      } else {
+        await notifyFallbackMode();
+      }
+    },
+    async final(message) {
+      finalizing = true;
+      const rendered = renderWeComPayload(message);
+      const pages = rendered.pages?.length ? rendered.pages : [rendered.content];
+
+      if (streamUnavailable && finalTarget) {
+        const delivered = await sendMarkdownPages(pages);
+        if (delivered === pages.length) {
+          finished = true;
+          console.info(`[wecom] final delivered via proactive fallback chat=${binding.chatId} pages=${pages.length} reason=${streamUnavailableReason || 'stream unavailable'}`);
+        } else {
+          console.warn(`[wecom] final fallback incomplete chat=${binding.chatId} delivered=${delivered}/${pages.length} reason=${streamUnavailableReason || 'stream unavailable'}`);
+        }
+        return;
+      }
+
+      if (finalTarget) {
+        if (pages.length <= 1) {
+          const ok = await sendMarkdown(pages[0]);
+          if (ok) {
+            finished = true;
+            console.info(`[wecom] final delivered via proactive target chat=${binding.chatId} pages=${pages.length}`);
+            return;
+          }
+        } else {
+          const deliveredPrefix = await sendMarkdownPages(pages, 0, pages.length - 1);
+          if (deliveredPrefix < pages.length - 1) {
+            const delivered = await sendMarkdownPages(pages, deliveredPrefix);
+            if (delivered === pages.length) {
+              finished = true;
+              console.info(`[wecom] final delivered via proactive pagination chat=${binding.chatId} pages=${pages.length}`);
+            } else {
+              console.warn(`[wecom] final proactive pagination incomplete chat=${binding.chatId} delivered=${delivered}/${pages.length}`);
+            }
+            return;
+          }
+
+          const lastOk = await sendMarkdown(pages[pages.length - 1]);
+          if (lastOk) {
+            finished = true;
+            console.info(`[wecom] final delivered via proactive target chat=${binding.chatId} pages=${pages.length}`);
+            return;
+          }
+        }
+      }
+
+      if (pages.length <= 1 || !finalTarget) {
+        const result = await sendStream(pages[pages.length - 1], true);
+        if (result?.ok) return;
+        if (!finalTarget) {
+          console.warn(`[wecom] final stream failed without proactive target chat=${binding.chatId} reason=${streamUnavailableReason || 'no target'}`);
+          return;
+        }
+        const delivered = await sendMarkdownPages(pages);
+        if (delivered === pages.length) {
+          finished = true;
+          console.info(`[wecom] final delivered via proactive fallback chat=${binding.chatId} pages=${pages.length} reason=${streamUnavailableReason || 'stream failed'}`);
+        } else {
+          console.warn(`[wecom] final fallback incomplete chat=${binding.chatId} delivered=${delivered}/${pages.length} reason=${streamUnavailableReason || 'stream failed'}`);
+        }
+        return;
+      }
+
+      const streamResult = await sendStream(pages[pages.length - 1], true);
+      if (streamResult?.ok) {
+        console.info(`[wecom] final delivered chat=${binding.chatId} pages=${pages.length} mode=mixed`);
+        return;
+      }
+
+      const delivered = await sendMarkdownPages(pages, pages.length - 1);
+      if (delivered === pages.length) {
+        finished = true;
+        console.info(`[wecom] final last-page fallback delivered chat=${binding.chatId} pages=${pages.length} reason=${streamUnavailableReason || 'stream final failed'}`);
+      } else {
+        console.warn(`[wecom] final last-page fallback incomplete chat=${binding.chatId} delivered=${delivered}/${pages.length} reason=${streamUnavailableReason || 'stream final failed'}`);
       }
     },
   };
@@ -137,161 +341,7 @@ export async function startWeComAdapter(config, controller) {
       text = text.replace(/^\s*@\S+\s*/, '').trim();
     }
     console.info(`[wecom] message chat=${binding.chatId} type=${binding.chattype} user=${binding.userid || '-'} text=${text.slice(0, 120)}`);
-
-    const streamId = generateReqId('stream');
-    const finalTarget = targetFromBinding(binding);
-    let finished = false;
-    let sendChain = Promise.resolve();
-    let lastProgressContent = '';
-    let lastProgressPhase = '';
-    let lastProgressAt = 0;
-    let streamUnavailable = false;
-    let streamUnavailableReason = '';
-    let fallbackNoticeSent = false;
-    let progressDelivered = false;
-
-    const queueSend = (operation) => {
-      const task = sendChain
-        .catch(() => {})
-        .then(operation);
-      sendChain = task.then(() => undefined, () => undefined);
-      return task;
-    };
-
-    const sendMarkdown = async (content) => {
-      if (!finalTarget) return false;
-      try {
-        await client.sendMessage(finalTarget, {
-          msgtype: 'markdown',
-          markdown: { content },
-        });
-        return true;
-      } catch (error) {
-        const reason = errorText(error);
-        status.lastError = reason;
-        console.warn(`[wecom] proactive send failed chat=${binding.chatId} type=${binding.chattype} user=${binding.userid || '-'} reason=${reason}`);
-        return false;
-      }
-    };
-
-    const sendMarkdownPages = async (pages, startIndex = 0, endIndex = pages.length) => {
-      let delivered = startIndex;
-      for (let index = startIndex; index < endIndex; index += 1) {
-        const ok = await sendMarkdown(pages[index]);
-        if (!ok) break;
-        delivered = index + 1;
-      }
-      return delivered;
-    };
-
-    const notifyFallbackMode = async () => {
-      if (fallbackNoticeSent || finished || !finalTarget || !progressDelivered) return;
-      fallbackNoticeSent = true;
-      await sendMarkdown('流式进度已中断，任务仍在继续，完成后会补发最终结果。');
-    };
-
-    const sendStream = (content, finish) => {
-      return queueSend(async () => {
-        if (finished && !finish) return { ok: false, skipped: true };
-        try {
-          await client.replyStream(frame, streamId, content, finish);
-          if (finish) finished = true;
-          return { ok: true };
-        } catch (error) {
-          const reason = errorText(error);
-          status.lastError = reason;
-          streamUnavailable = true;
-          streamUnavailableReason = reason;
-          console.warn(`[wecom] stream ${finish ? 'final' : 'progress'} failed chat=${binding.chatId} type=${binding.chattype} user=${binding.userid || '-'} reason=${reason}`);
-          return { ok: false, error };
-        }
-      });
-    };
-
-    const sink = {
-      async progress(message) {
-        if (finished) return;
-        if (streamUnavailable) {
-          await notifyFallbackMode();
-          return;
-        }
-        const rendered = renderWeComPayload(message);
-        const phase = String(message?.preview?.phase || message?.marker || '').toLowerCase();
-        const now = Date.now();
-        const phaseChanged = phase && phase !== lastProgressPhase;
-        const timeElapsed = now - lastProgressAt;
-        const minIntervalMs = 1000;
-        if (!phaseChanged && rendered.content === lastProgressContent) return;
-        if (!phaseChanged && lastProgressAt > 0 && timeElapsed < minIntervalMs) return;
-        lastProgressContent = rendered.content;
-        lastProgressPhase = phase;
-        lastProgressAt = now;
-        const result = await sendStream(rendered.content, false);
-        if (result?.ok) {
-          progressDelivered = true;
-        } else {
-          await notifyFallbackMode();
-        }
-      },
-      async final(message) {
-        const rendered = renderWeComPayload(message);
-        const pages = rendered.pages?.length ? rendered.pages : [rendered.content];
-
-        if (streamUnavailable && finalTarget) {
-          const delivered = await sendMarkdownPages(pages);
-          if (delivered === pages.length) {
-            finished = true;
-            console.info(`[wecom] final delivered via proactive fallback chat=${binding.chatId} pages=${pages.length} reason=${streamUnavailableReason || 'stream unavailable'}`);
-          } else {
-            console.warn(`[wecom] final fallback incomplete chat=${binding.chatId} delivered=${delivered}/${pages.length} reason=${streamUnavailableReason || 'stream unavailable'}`);
-          }
-          return;
-        }
-
-        if (pages.length <= 1 || !finalTarget) {
-          const result = await sendStream(pages[0], true);
-          if (result?.ok) return;
-          if (!finalTarget) {
-            console.warn(`[wecom] final stream failed without proactive target chat=${binding.chatId} reason=${streamUnavailableReason || 'no target'}`);
-            return;
-          }
-          const delivered = await sendMarkdownPages(pages);
-          if (delivered === pages.length) {
-            finished = true;
-            console.info(`[wecom] final delivered via proactive fallback chat=${binding.chatId} pages=${pages.length} reason=${streamUnavailableReason || 'stream failed'}`);
-          } else {
-            console.warn(`[wecom] final fallback incomplete chat=${binding.chatId} delivered=${delivered}/${pages.length} reason=${streamUnavailableReason || 'stream failed'}`);
-          }
-          return;
-        }
-
-        const deliveredPrefix = await sendMarkdownPages(pages, 0, pages.length - 1);
-        if (deliveredPrefix < pages.length - 1) {
-          const delivered = await sendMarkdownPages(pages, deliveredPrefix);
-          if (delivered === pages.length) {
-            finished = true;
-            console.info(`[wecom] final delivered via proactive pagination chat=${binding.chatId} pages=${pages.length}`);
-          } else {
-            console.warn(`[wecom] final proactive pagination incomplete chat=${binding.chatId} delivered=${delivered}/${pages.length}`);
-          }
-          return;
-        }
-
-        const streamResult = await sendStream(pages[pages.length - 1], true);
-        if (streamResult?.ok) {
-          console.info(`[wecom] final delivered chat=${binding.chatId} pages=${pages.length} mode=mixed`);
-          return;
-        }
-
-        const delivered = await sendMarkdownPages(pages, pages.length - 1);
-        if (delivered === pages.length) {
-          finished = true;
-          console.info(`[wecom] final last-page fallback delivered chat=${binding.chatId} pages=${pages.length} reason=${streamUnavailableReason || 'stream final failed'}`);
-        } else {
-          console.warn(`[wecom] final last-page fallback incomplete chat=${binding.chatId} delivered=${delivered}/${pages.length} reason=${streamUnavailableReason || 'stream final failed'}`);
-        }
-      },
-    };
+    const sink = createWeComReplySink(client, frame, binding, status);
 
     await controller.handleInput({
       host: 'wecom',

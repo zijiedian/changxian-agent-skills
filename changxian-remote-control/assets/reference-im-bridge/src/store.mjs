@@ -39,6 +39,12 @@ function stableId(prefix) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
 }
 
+function clipConversationContent(value, limit = 4000) {
+  const text = String(value || '').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
 function normalizeWorkdirValue(workdir, { defaultWorkdir, legacyPrefixes = [] }) {
   const raw = String(workdir || '').trim();
   if (!raw) return String(defaultWorkdir);
@@ -61,6 +67,20 @@ function normalizeWorkdirValue(workdir, { defaultWorkdir, legacyPrefixes = [] })
   }
 
   return resolved;
+}
+
+function normalizeCommandPrefixValue(prefix, {
+  codexCommandPrefix = 'codex-acp',
+  claudeCommandPrefix = 'claude-agent-acp',
+  piCommandPrefix = 'pi-acp',
+} = {}) {
+  const raw = String(prefix || '').trim();
+  if (!raw) return raw;
+  const first = path.basename(raw.split(/\s+/, 1)[0] || '').toLowerCase();
+  if (first === 'codex' || first === 'codex.exe') return String(codexCommandPrefix);
+  if (first === 'claude' || first === 'claude.exe') return String(claudeCommandPrefix);
+  if (first === 'pi' || first === 'pi.exe') return String(piCommandPrefix);
+  return raw;
 }
 
 export class StateStore {
@@ -99,6 +119,14 @@ export class StateStore {
       );
       CREATE INDEX IF NOT EXISTS idx_memories_chat_scope_updated ON memories(chat_id, scope, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_memories_chat_pinned ON memories(chat_id, pinned DESC, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS conversation_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_conversation_messages_chat_created ON conversation_messages(chat_id, created_at DESC, id DESC);
       CREATE TABLE IF NOT EXISTS scheduled_jobs (
         id TEXT PRIMARY KEY,
         chat_id TEXT NOT NULL,
@@ -151,6 +179,33 @@ export class StateStore {
       const nextWorkdir = normalize(row.workdir);
       if (nextWorkdir === row.workdir) continue;
       this.updateJob(row.chat_id, row.id, { workdir: nextWorkdir });
+    }
+  }
+
+  normalizeLegacyCommandPrefixes({
+    codexCommandPrefix = 'codex-acp',
+    claudeCommandPrefix = 'claude-agent-acp',
+    piCommandPrefix = 'pi-acp',
+  } = {}) {
+    const normalize = (value) => normalizeCommandPrefixValue(value, {
+      codexCommandPrefix,
+      claudeCommandPrefix,
+      piCommandPrefix,
+    });
+
+    const chatRows = this.db.prepare('SELECT chat_id, prefix FROM chat_command_prefixes').all();
+    for (const row of chatRows) {
+      const nextPrefix = normalize(row.prefix);
+      if (nextPrefix === row.prefix) continue;
+      this.setChatCommandPrefix(row.chat_id, nextPrefix);
+    }
+
+    const jobRows = this.db.prepare('SELECT id, chat_id, command_prefix FROM scheduled_jobs').all();
+    for (const row of jobRows) {
+      const nextPrefix = normalize(row.command_prefix);
+      if (nextPrefix === row.command_prefix) continue;
+      this.db.prepare('UPDATE scheduled_jobs SET command_prefix = ?, updated_at = ? WHERE chat_id = ? AND id = ?')
+        .run(nextPrefix, nowTs(), String(row.chat_id), String(row.id));
     }
   }
 
@@ -401,6 +456,44 @@ export class StateStore {
   clearMemoryScope(chatId, scope) {
     const info = this.db.prepare('DELETE FROM memories WHERE chat_id = ? AND scope = ?').run(String(chatId), String(scope));
     return info.changes;
+  }
+
+  appendConversationMessage(chatId, role, content, { maxItems = 24 } = {}) {
+    const trimmed = clipConversationContent(content);
+    if (!trimmed) return null;
+    const now = nowTs();
+    this.db.prepare(`
+      INSERT INTO conversation_messages (chat_id, role, content, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(String(chatId), String(role || 'user'), trimmed, now);
+
+    const rows = this.db.prepare('SELECT id FROM conversation_messages WHERE chat_id = ? ORDER BY created_at DESC, id DESC').all(String(chatId));
+    if (rows.length > maxItems) {
+      const overflow = rows.slice(maxItems).map((row) => row.id);
+      const remove = this.db.prepare('DELETE FROM conversation_messages WHERE id = ?');
+      const tx = this.db.transaction((ids) => {
+        for (const id of ids) remove.run(id);
+      });
+      tx(overflow);
+    }
+
+    return {
+      chat_id: String(chatId),
+      role: String(role || 'user'),
+      content: trimmed,
+      created_at: now,
+    };
+  }
+
+  listConversationMessages(chatId, { limit = 6 } = {}) {
+    const rows = this.db.prepare(`
+      SELECT role, content, created_at
+      FROM conversation_messages
+      WHERE chat_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(String(chatId), Number(limit));
+    return rows.reverse();
   }
 
   countJobs(chatId, { enabledOnly = false } = {}) {

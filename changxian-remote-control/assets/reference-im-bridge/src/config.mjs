@@ -30,6 +30,14 @@ function parseDurationSeconds(raw, fallbackSeconds = 7 * 24 * 3600) {
   return seconds;
 }
 
+function parsePathList(raw) {
+  return String(raw || '')
+    .split(/[\n,]/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => path.resolve(value));
+}
+
 export function codexHome() {
   return process.env.CODEX_HOME?.trim() ? path.resolve(process.env.CODEX_HOME.trim()) : path.join(os.homedir(), '.codex');
 }
@@ -37,7 +45,7 @@ export function codexHome() {
 export function defaultStateDir() {
   return process.env.RC_STATE_DIR?.trim()
     ? path.resolve(process.env.RC_STATE_DIR.trim())
-    : path.join(codexHome(), 'changxian-agent', 'remote-control-js');
+    : path.join(codexHome(), 'changxian-agent', 'remote-control');
 }
 
 export function loadConfig() {
@@ -49,8 +57,13 @@ export function loadConfig() {
   const tgDefaultChannel = String(process.env.TG_DEFAULT_CHANNEL || '').trim();
   const tgChannelAllowedOperatorIds = normalizeTelegramChannelAllowlist(firstEnv('TG_CHANNEL_ALLOWED_OPERATOR_IDS'));
   const defaultBackend = normalizeBackendAlias(process.env.RC_DEFAULT_BACKEND, BACKEND_CODEX);
-  const codexCommandPrefix = String(process.env.CODEX_COMMAND_PREFIX || 'codex -a never --search exec -s danger-full-access --skip-git-repo-check').trim();
+  const codexCommandPrefix = String(process.env.CODEX_COMMAND_PREFIX || 'codex-acp').trim();
   const opencodeCommandPrefix = String(process.env.OPENCODE_ACP_COMMAND_PREFIX || 'opencode acp').trim();
+  const claudeCommandPrefix = String(process.env.RC_CLAUDE_COMMAND_PREFIX || 'claude-agent-acp').trim();
+  const piCommandPrefix = String(process.env.RC_PI_COMMAND_PREFIX || 'pi-acp').trim();
+  const permissionAutoApproveTrustedReads = ['1', 'true', 'yes', 'on'].includes(String(process.env.RC_PERMISSION_AUTO_APPROVE_TRUSTED_READS || '').trim().toLowerCase());
+  const permissionAutoApproveOptionKind = String(process.env.RC_PERMISSION_AUTO_APPROVE_OPTION || 'allow_once').trim().toLowerCase() || 'allow_once';
+  const permissionTrustedRoots = parsePathList(process.env.RC_PERMISSION_TRUSTED_ROOTS || '');
   return {
     stateDir,
     host: String(process.env.RC_HOST || '0.0.0.0').trim(),
@@ -65,17 +78,25 @@ export function loadConfig() {
     wecomBotId: String(process.env.WECOM_BOT_ID || '').trim(),
     wecomBotSecret: String(process.env.WECOM_BOT_SECRET || '').trim(),
     wecomWsUrl: String(process.env.WECOM_WEBSOCKET_URL || 'wss://openws.work.weixin.qq.com').trim(),
+    weixinEnabled: !['0', 'false', 'no'].includes(String(process.env.WEIXIN_ENABLED || '').toLowerCase()) && Boolean(String(process.env.WEIXIN_ENABLED || '').trim()),
+    weixinAccountId: String(process.env.WEIXIN_ACCOUNT_ID || '').trim(),
     defaultBackend,
     codexCommandPrefix,
+    claudeCommandPrefix,
     opencodeCommandPrefix,
-    defaultCommandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, opencodeCommandPrefix }, defaultBackend),
+    piCommandPrefix,
+    defaultCommandPrefix: defaultCommandPrefixForBackend({ codexCommandPrefix, claudeCommandPrefix, opencodeCommandPrefix, piCommandPrefix }, defaultBackend),
     codexTimeoutSeconds: Number.parseInt(process.env.CODEX_TIMEOUT_SECONDS || '21600', 10),
     opencodeTimeoutSeconds: Number.parseInt(process.env.OPENCODE_ACP_TIMEOUT_SECONDS || '21600', 10),
+    piTimeoutSeconds: Number.parseInt(process.env.RC_PI_TIMEOUT_SECONDS || '21600', 10),
     defaultTimezone: String(process.env.RC_DEFAULT_TIMEZONE || 'Asia/Shanghai').trim(),
     defaultWorkdir: path.resolve(String(process.env.RC_DEFAULT_WORKDIR || process.cwd()).trim() || process.cwd()),
     maxBufferedOutputChars: Number.parseInt(process.env.RC_MAX_BUFFERED_OUTPUT_CHARS || '200000', 10),
     maxConcurrentTasks: Number.parseInt(process.env.RC_MAX_CONCURRENT_TASKS || '2', 10),
     enableSessionResume: !['0', 'false', 'no'].includes(String(process.env.RC_ENABLE_SESSION_RESUME || '1').toLowerCase()),
+    permissionAutoApproveTrustedReads,
+    permissionAutoApproveOptionKind,
+    permissionTrustedRoots,
     enableMemory: !['0', 'false', 'no'].includes(String(process.env.RC_ENABLE_MEMORY || '1').toLowerCase()),
     memoryAutoSave: !['0', 'false', 'no'].includes(String(process.env.RC_MEMORY_AUTO_SAVE || '1').toLowerCase()),
     memoryMaxItems: Number.parseInt(process.env.RC_MEMORY_MAX_ITEMS || '6', 10),

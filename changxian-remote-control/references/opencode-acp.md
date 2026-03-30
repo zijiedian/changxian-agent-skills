@@ -1,6 +1,6 @@
 # OpenCode ACP Backend
 
-Use this reference when the Telegram or WeCom bridge should drive OpenCode through ACP instead of the Codex SDK backend.
+Use this reference when the Telegram or WeCom bridge should drive OpenCode through ACP instead of the Codex ACP backend.
 
 ## What Changed
 
@@ -35,7 +35,7 @@ OPENCODE_ACP_TIMEOUT_SECONDS=21600
 
 - `/backend` shows the current backend and command prefix
 - `/backend opencode-acp` switches the current chat to OpenCode ACP
-- `/backend codex` switches the current chat back to Codex SDK
+- `/backend codex` switches the current chat back to Codex ACP
 - `/backend default` clears the per-chat override and falls back to `RC_DEFAULT_BACKEND`
 - `/cmd <prefix>` overrides the command prefix for the current chat, so it can target:
   - `opencode acp`

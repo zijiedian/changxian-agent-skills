@@ -6,20 +6,43 @@ import { applyAssistantOps } from './assistant_ops.mjs';
 import {
   BACKEND_CODEX,
   BACKEND_OPENCODE_ACP,
+  BACKEND_CLAUDE,
+  BACKEND_PI,
   backendLabel,
   defaultCommandPrefixForBackend,
   detectBackend,
+  isAcpCommandPrefix,
   normalizeBackendAlias,
 } from './backend-detection.mjs';
-import { CodexSdkProvider } from './codex-sdk-provider.mjs';
-import { extractStructuredPreview } from './codex.mjs';
+import { CodexAcpProvider } from './codex-acp-provider.mjs';
+import { ClaudeAgentAcpProvider } from './claude-agent-acp-provider.mjs';
 import { OpencodeAcpProvider } from './opencode-acp-provider.mjs';
+import { PiAcpProvider } from './pi-acp-provider.mjs';
 import { buildExecutionEnv, runCommandPreflight } from './preflight.mjs';
 import { parseChannelCommandInput } from './telegram-channel-publisher.mjs';
-import { redactedCommandText, truncateText } from './utils.mjs';
+import { buildStructuredPreview, extractStructuredPreview, redactedCommandText, truncateText } from './utils.mjs';
+import {
+  buildClaudePermissionPrefix,
+  buildCodexPermissionPrefix,
+  buildRuntimeControlState,
+  isClaudePermissionLevel,
+  isCodexPermissionLevel,
+} from './runtime-controls.mjs';
+import { CliToolsManager, formatCliStatusLine, summarizeUpdateResult } from './cli-tools.mjs';
+import {
+  listSystemMcpServers,
+  listSystemSkills,
+  setSystemMcpEnabled,
+  setSystemSkillEnabled,
+} from './resource-registry.mjs';
 
-const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[CURRENT TASK]'];
+// 新渲染架构
+import { createRenderer, createMessageTransformer } from './render/index.mjs';
+
+const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[RECENT DIALOGUE]', '[CURRENT TASK]'];
 const PREFLIGHT_CACHE_TTL_MS = 5 * 60 * 1000;
+const TASK_STALE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes stale task cleanup
+const TASK_CLEANUP_INTERVAL_MS = 60 * 1000; // cleanup every 60 seconds
 
 function balanceMarkdownFences(text) {
   const value = String(text || '').trimEnd();
@@ -65,25 +88,225 @@ function looksLikeContextPreview(text, prompt) {
   return Boolean(normalizedPrompt && (normalizedValue === normalizedPrompt || normalizedValue.startsWith(normalizedPrompt)));
 }
 
+function summarizeMemoryRecord(record) {
+  const flags = [];
+  if (record?.pinned) flags.push('pinned');
+  if (record?.importance != null && Number(record.importance) > 0) flags.push(`importance=${Number(record.importance)}`);
+  const header = [
+    record?.id || '',
+    record?.kind ? `[${record.kind}]` : '',
+    flags.length ? `(${flags.join(', ')})` : '',
+    record?.title || '',
+  ].filter(Boolean).join(' ');
+  const body = String(record?.content || '').replace(/\s+/g, ' ').trim();
+  return `- ${header}\n  ${body}`;
+}
+
+function summarizeConversationMessage(entry) {
+  const role = String(entry?.role || '').trim() || 'user';
+  const content = String(entry?.content || '').replace(/\s+/g, ' ').trim();
+  if (!content) return '';
+  return `- ${role}: ${truncateText(content, 220)}`;
+}
+
+function shortenHomePath(filePath = '') {
+  const value = String(filePath || '').trim();
+  if (!value) return '';
+  const home = process.env.HOME || '';
+  if (home && value.startsWith(home)) return `~${value.slice(home.length)}`;
+  return value;
+}
+
+function paginateItems(items = [], page = 0, pageSize = 4) {
+  const total = Array.isArray(items) ? items.length : 0;
+  const size = Math.max(1, Number(pageSize) || 4);
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const currentPage = Math.max(0, Math.min(Number(page) || 0, totalPages - 1));
+  const start = currentPage * size;
+  const slice = items.slice(start, start + size);
+  return { items: slice, page: currentPage, pageSize: size, total, totalPages };
+}
+
+function decodeHtmlEntities(text) {
+  return String(text || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, '\'')
+    .replace(/&amp;/g, '&');
+}
+
+function plainTextFromRenderedMessage(rendered) {
+  const body = String(rendered?.body || '').trim();
+  if (!body) return '';
+  if (String(rendered?.format || '').trim().toLowerCase() !== 'html') return body;
+  return decodeHtmlEntities(
+    body
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(?:p|div|pre|li|blockquote|h[1-6])>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+  )
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function progressMarkerForOutgoing(outgoing) {
+  switch (String(outgoing?.type || '').trim().toLowerCase()) {
+    case 'tool_call':
+    case 'tool_update':
+      return 'exec';
+    case 'thought':
+    case 'plan':
+    case 'mode_change':
+    case 'config_update':
+    case 'model_update':
+    case 'system_message':
+      return 'thinking';
+    case 'text':
+    case 'user_replay':
+    case 'resource':
+    case 'resource_link':
+      return 'assistant';
+    default:
+      return 'thinking';
+  }
+}
+
+function progressTextForRenderedEvent(event, outgoing, rendered) {
+  const renderedText = plainTextFromRenderedMessage(rendered);
+  const metadata = outgoing?.metadata || {};
+  switch (String(outgoing?.type || '').trim().toLowerCase()) {
+    case 'tool_call':
+    case 'tool_update':
+      return String(metadata.displaySummary || event?.content || renderedText || outgoing?.text || '').trim();
+    case 'thought':
+    case 'text':
+    case 'user_replay':
+      return String(event?.content || renderedText || outgoing?.text || '').trim();
+    case 'mode_change':
+    case 'config_update':
+    case 'model_update':
+    case 'system_message':
+    case 'plan':
+    case 'resource':
+    case 'resource_link':
+      return String(renderedText || outgoing?.text || event?.message || '').trim();
+    default:
+      return String(renderedText || outgoing?.text || '').trim();
+  }
+}
+
+function isPiSkillInventoryEvent(event, backend) {
+  if (backend !== BACKEND_PI) return false;
+  if (String(event?.type || '').trim().toLowerCase() !== 'text') return false;
+  const content = String(event?.content || '').trim();
+  if (!content.startsWith('## Skills')) return false;
+  if (!/\/(?:\.pi\/agent|\.agents)\/skills\//.test(content)) return false;
+  const skillPathMatches = content.match(/\/SKILL\.md\b/g) || [];
+  return skillPathMatches.length >= 2;
+}
+
+function shouldSuppressProgressEvent(event, { backend = '' } = {}) {
+  const type = String(event?.type || '').trim().toLowerCase();
+  return type === 'session_info_update' || isPiSkillInventoryEvent(event, backend);
+}
+
 export class RuntimeController {
   constructor(config, store) {
     this.config = config;
     this.store = store;
     this.tasks = new Map();
+    this.taskQueues = new Map();
     this.authSessions = new Map();
     this.scheduler = null;
     this.preflightCache = new Map();
-    this.codexSdk = new CodexSdkProvider(config, buildExecutionEnv);
+    this.staleTaskCleanupTimer = null;
+    
+    // ACP Providers
+    this.codexAcp = new CodexAcpProvider(config, buildExecutionEnv);
+    this.claudeAcp = new ClaudeAgentAcpProvider(config, buildExecutionEnv);
     this.opencodeAcp = new OpencodeAcpProvider(config, buildExecutionEnv);
+    this.piAcp = new PiAcpProvider(config, buildExecutionEnv);
+    
+    // CLI Tools
+    this.cliTools = new CliToolsManager(() => this.executionEnv());
+    
+    // 新渲染架构
+    this.renderers = {
+      telegram: createRenderer('telegram'),
+      wecom: createRenderer('wecom'),
+      base: createRenderer('base'),
+    };
+    this.messageTransformer = createMessageTransformer();
+    
+    // Channel Publisher
     this.telegramChannelPublisher = null;
+    this.startStaleTaskCleanup();
   }
 
   attachScheduler(scheduler) {
     this.scheduler = scheduler || null;
   }
 
+  startStaleTaskCleanup() {
+    if (this.staleTaskCleanupTimer) return;
+    this.staleTaskCleanupTimer = setInterval(() => this.cleanupStaleTasks(), TASK_CLEANUP_INTERVAL_MS);
+    this.staleTaskCleanupTimer.unref?.();
+  }
+
+  stopStaleTaskCleanup() {
+    if (this.staleTaskCleanupTimer) {
+      clearInterval(this.staleTaskCleanupTimer);
+      this.staleTaskCleanupTimer = null;
+    }
+  }
+
+  cleanupStaleTasks() {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [taskKey, entry] of this.tasks.entries()) {
+      if (entry && now - entry.startedAt > TASK_STALE_TIMEOUT_MS) {
+        console.warn(`[controller] stale task cleanup host=${entry.host} chat=${entry.chatId} age=${Math.round((now - entry.startedAt) / 1000)}s`);
+        entry.cancel();
+        this.tasks.delete(taskKey);
+        cleaned++;
+      }
+    }
+    if (cleaned > 0) {
+      console.info(`[controller] cleaned ${cleaned} stale tasks, remaining=${this.tasks.size}`);
+    }
+  }
+
   attachTelegramChannelPublisher(publisher) {
     this.telegramChannelPublisher = publisher || null;
+  }
+
+  rendererForHost(host) {
+    const normalized = String(host || '').trim().toLowerCase();
+    if (normalized === 'telegram') return this.renderers.telegram;
+    if (normalized === 'wecom') return this.renderers.wecom;
+    return this.renderers.base;
+  }
+
+  buildRenderedProgressPayload(host, event, { elapsedSeconds = 0, workingDirectory = '' } = {}) {
+    const renderer = this.rendererForHost(host);
+    const outgoing = this.messageTransformer.transform(event, {
+      id: String(host || 'runtime'),
+      workingDirectory,
+    });
+    const rendered = renderer.render(outgoing, 'medium');
+    const marker = progressMarkerForOutgoing(outgoing);
+    const text = progressTextForRenderedEvent(event, outgoing, rendered) || 'thinking...';
+    return {
+      status: 'Running',
+      marker,
+      text,
+      preview: buildStructuredPreview(text, { status: 'Running', marker }),
+      elapsedSeconds,
+      event,
+      outgoing,
+      rendered,
+    };
   }
 
   makeTaskKey(host, chatId) {
@@ -99,13 +322,84 @@ export class RuntimeController {
     return [...this.tasks.values()].some((entry) => entry?.chatId === target);
   }
 
+  hasSchedulerTaskForChat(chatId) {
+    const target = String(chatId);
+    return [...this.tasks.values()].some((entry) => entry?.chatId === target && this.isSchedulerTaskHost(entry.host));
+  }
+
+  queuedTaskCount(chatId) {
+    return (this.taskQueues.get(String(chatId)) || []).length;
+  }
+
   hasConflictingRunningTaskForChat(chatId, taskHost) {
     const target = String(chatId);
-    const schedulerTask = this.isSchedulerTaskHost(taskHost);
-    return [...this.tasks.values()].some((entry) => {
-      if (!entry || entry.chatId !== target) return false;
-      if (!schedulerTask) return true;
-      return this.isSchedulerTaskHost(entry.host);
+    const currentIsScheduler = this.isSchedulerTaskHost(taskHost);
+    for (const entry of this.tasks.values()) {
+      if (entry?.chatId !== target) continue;
+      const existingIsScheduler = this.isSchedulerTaskHost(entry.host);
+      if (currentIsScheduler && !existingIsScheduler) continue;
+      return true;
+    }
+    return false;
+  }
+
+  shouldQueueConflictingTask(chatId, taskHost, options = {}) {
+    if (options.allowQueue === false) return false;
+    if (this.isSchedulerTaskHost(taskHost)) return false;
+    if (this.hasSchedulerTaskForChat(chatId)) return false;
+    return true;
+  }
+
+  queueNoticeText(chatId) {
+    const queued = this.queuedTaskCount(chatId);
+    if (queued > 0) return `当前会话忙碌中，已加入队列，前方还有 ${queued} 个排队任务。`;
+    return '当前会话忙碌中，已加入队列，等待当前任务完成。';
+  }
+
+  async enqueueTask(request, sink, options = {}) {
+    const chatId = String(request.chatId);
+    const queue = this.taskQueues.get(chatId) || [];
+    const notice = this.queueNoticeText(chatId);
+    try {
+      await sink.progress({
+        status: 'Queued',
+        marker: 'thinking',
+        text: notice,
+        preview: buildStructuredPreview(notice, { status: 'Queued', marker: 'thinking' }),
+        elapsedSeconds: 0,
+      });
+    } catch {
+      // ignore queue acknowledgement failures
+    }
+
+    return await new Promise((resolve, reject) => {
+      queue.push({
+        request,
+        sink,
+        options: { ...options, allowQueue: false },
+        resolve,
+        reject,
+      });
+      this.taskQueues.set(chatId, queue);
+    });
+  }
+
+  drainTaskQueue(chatId) {
+    const target = String(chatId);
+    if (this.hasRunningTaskForChat(target)) return;
+    const queue = this.taskQueues.get(target);
+    if (!queue?.length) return;
+
+    const next = queue.shift();
+    if (!queue.length) this.taskQueues.delete(target);
+
+    queueMicrotask(() => {
+      Promise.resolve()
+        .then(() => this.runTask(next.request, next.sink, next.options))
+        .then(next.resolve, next.reject)
+        .finally(() => {
+          if (!this.hasRunningTaskForChat(target)) this.drainTaskQueue(target);
+        });
     });
   }
 
@@ -160,9 +454,15 @@ export class RuntimeController {
     return detectBackend(this.effectiveCommandPrefix(chatId));
   }
 
-  backendProvider(backend) {
-    if (backend === BACKEND_CODEX) return this.codexSdk;
+  runtimeControlState(chatId) {
+    return buildRuntimeControlState(this.effectiveBackend(chatId), this.effectiveCommandPrefix(chatId), this.config);
+  }
+
+  backendProvider(backend, commandPrefix = '') {
+    if (backend === BACKEND_CODEX) return this.codexAcp;
     if (backend === BACKEND_OPENCODE_ACP) return this.opencodeAcp;
+    if (backend === BACKEND_CLAUDE) return this.claudeAcp;
+    if (backend === BACKEND_PI) return this.piAcp;
     return null;
   }
 
@@ -240,7 +540,10 @@ export class RuntimeController {
 
   buildPrompt(chatId, prompt, hostName, { roleName = '', memoryScope = '' } = {}) {
     const sections = [];
-    sections.push(`[REMOTE HOST]\nRunning through ${hostName}. Keep progress concise and action-oriented. Only emit rc-role-ops, rc-memory-ops, or rc-schedule-ops blocks when the user explicitly asks to change roles, memory, or schedules.`);
+    const autoMemoryPolicy = this.config.memoryAutoSave
+      ? 'You may emit rc-memory-ops even without an explicit remember request when recent dialogue reveals durable preferences, stable facts, long-lived constraints, owned resources, recurring workdirs, style choices, or project context that will matter in future turns. Prefer updating an existing memory instead of creating duplicates when the new fact clearly refines something already stored. Never store secrets, tokens, one-off task outputs, or transient debugging details.'
+      : 'Only emit rc-role-ops, rc-memory-ops, or rc-schedule-ops blocks when the user explicitly asks to change roles, memory, or schedules.';
+    sections.push(`[REMOTE HOST]\nRunning through ${hostName}. Keep progress concise and action-oriented. ${autoMemoryPolicy}`);
     const activeRole = roleName || this.activeRoleName(chatId);
     if (activeRole) {
       const roleContent = this.store.getRole(chatId, activeRole);
@@ -250,8 +553,13 @@ export class RuntimeController {
       const scope = memoryScope || this.defaultMemoryScope(chatId);
       const memories = this.store.listMemories(chatId, { scope, limit: Math.min(4, this.config.memoryMaxItems) });
       if (memories.length) {
-        sections.push('[MEMORY CONTEXT]\n' + memories.map((record) => `- ${record.kind}: ${String(record.content).replace(/\s+/g, ' ').trim()}`).join('\n'));
+        sections.push('[MEMORY CONTEXT]\n' + memories.map((record) => summarizeMemoryRecord(record)).join('\n'));
       }
+    }
+    const recentMessages = this.store.listConversationMessages?.(chatId, { limit: 6 }) || [];
+    if (recentMessages.length) {
+      const lines = recentMessages.map((entry) => summarizeConversationMessage(entry)).filter(Boolean);
+      if (lines.length) sections.push('[RECENT DIALOGUE]\n' + lines.join('\n'));
     }
     sections.push(`[CURRENT TASK]\n${prompt}`);
     return sections.join('\n\n');
@@ -305,32 +613,15 @@ export class RuntimeController {
     }
 
     if (spec.name === 'start') {
-      const lines = ['remote-control', ...helpLines()];
+      const lines = ['remote-control', ...helpLines(), '', this.buildRuntimePanelText(chatId)];
       if (this.isSecondFactorEnabled() && !this.isAuthenticated(request)) {
         lines.push('', this.authRequiredText());
       }
-      await sink.final(lines.join('\n'));
-      return true;
-    }
-    if (spec.name === 'run') {
-      if (!rest) {
-        await sink.final('Usage\n/run <prompt>');
-        return true;
-      }
-      await this.runPrompt({ ...request, text: rest }, sink);
+      await sink.final(lines.join('\n'), { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'status') {
-      await sink.final([
-        `workdir: ${this.effectiveWorkdir(chatId)}`,
-        `role: ${this.activeRoleName(chatId) || '(none)'}`,
-        `memory: ${this.config.enableMemory ? 'enabled' : 'disabled'}`,
-        `scheduler: ${this.config.enableScheduler ? 'enabled' : 'disabled'}`,
-        `telegram_channels: ${Object.keys(this.config.tgChannelTargets || {}).length}`,
-        `telegram_default_channel: ${this.config.tgDefaultChannel || '(none)'}`,
-        `command: ${this.displayCommandPrefix(chatId)}`,
-        `running: ${this.hasRunningTaskForChat(chatId) ? 'yes' : 'no'}`,
-      ].join('\n'));
+      await sink.final(this.buildRuntimePanelText(chatId), { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'new') {
@@ -369,42 +660,34 @@ export class RuntimeController {
     }
     if (spec.name === 'cmd') {
       if (!rest) {
-        await sink.final(this.displayCommandPrefix(chatId));
+        await sink.final(this.buildRuntimePanelText(chatId), { telegramControls: { chatId } });
         return true;
       }
       if (['clear', 'reset', 'default'].includes(rest.toLowerCase())) {
         this.store.clearChatCommandPrefix(chatId);
-        await sink.final(this.displayCommandPrefix(chatId));
+        await sink.final(this.buildRuntimePanelText(chatId, '已恢复默认命令前缀。'), { telegramControls: { chatId } });
+        return true;
+      }
+      const permissionUpdate = this.applyPermissionLevel(chatId, rest);
+      if (permissionUpdate) {
+        await sink.final(this.buildRuntimePanelText(chatId, permissionUpdate), { telegramControls: { chatId } });
         return true;
       }
       this.store.setChatCommandPrefix(chatId, rest);
-      await sink.final(this.effectiveCommandPrefix(chatId));
+      await sink.final(this.buildRuntimePanelText(chatId, '已更新命令前缀。'), { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'backend') {
       if (!rest) {
-        const backend = this.effectiveBackend(chatId);
-        await sink.final(`backend: ${backend}\nlabel: ${backendLabel(backend)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
+        await sink.final(this.buildRuntimePanelText(chatId), { telegramControls: { chatId } });
         return true;
       }
-      const value = normalizeBackendAlias(rest);
-      if (value === 'default') {
-        this.store.clearChatCommandPrefix(chatId);
-        const backend = this.effectiveBackend(chatId);
-        await sink.final(`已恢复默认后端: ${backendLabel(backend)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
+      const updated = this.applyBackendSelection(chatId, rest);
+      if (updated) {
+        await sink.final(this.buildRuntimePanelText(chatId, updated), { telegramControls: { chatId } });
         return true;
       }
-      if (value === BACKEND_CODEX) {
-        this.store.setChatCommandPrefix(chatId, this.config.codexCommandPrefix);
-        await sink.final(`已切到 ${backendLabel(BACKEND_CODEX)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
-        return true;
-      }
-      if (value === BACKEND_OPENCODE_ACP) {
-        this.store.setChatCommandPrefix(chatId, this.config.opencodeCommandPrefix);
-        await sink.final(`已切到 ${backendLabel(BACKEND_OPENCODE_ACP)}\ncommand_prefix: ${this.displayCommandPrefix(chatId)}`);
-        return true;
-      }
-      await sink.final('Unsupported backend\nUsage\n/backend codex\n/backend opencode-acp\n/backend default');
+      await sink.final('Unsupported backend\nUsage\n/backend claude\n/backend codex\n/backend opencode-acp\n/backend pi\n/backend default', { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'memory') {
@@ -424,11 +707,35 @@ export class RuntimeController {
       return true;
     }
     if (spec.name === 'skill') {
-      await sink.final(this.handleSkillCommand());
+      await sink.final(this.handleSkillCommand(chatId, rest), {
+        telegramControls: {
+          chatId,
+          commandPanelAction: 'skill',
+          commandPanelPage: 0,
+        },
+      });
+      return true;
+    }
+    if (spec.name === 'mcp') {
+      await sink.final(this.handleMcpCommand(chatId, rest), {
+        telegramControls: {
+          chatId,
+          commandPanelAction: 'mcp',
+          commandPanelPage: 0,
+        },
+      });
       return true;
     }
     if (spec.name === 'setting') {
-      await sink.final(this.handleSettingCommand());
+      await sink.final(`${this.handleSettingCommand()}\n\n${this.buildRuntimePanelText(chatId)}`, { telegramControls: { chatId } });
+      return true;
+    }
+    if (spec.name === 'cli') {
+      await sink.final(this.buildCliPanelText(chatId, { checkLatest: true, force: true }), { telegramControls: { chatId } });
+      return true;
+    }
+    if (spec.name === 'upgrade') {
+      await sink.final(this.runCliUpgrade(chatId), { telegramControls: { chatId } });
       return true;
     }
     if (spec.name === 'auth') {
@@ -464,17 +771,117 @@ export class RuntimeController {
     return false;
   }
 
-  handleSkillCommand() {
-    const codexHome = process.env.CODEX_HOME?.trim() ? path.resolve(process.env.CODEX_HOME.trim()) : path.join(process.env.HOME || '', '.codex');
-    const skillsDir = path.join(codexHome, 'skills');
-    if (!fs.existsSync(skillsDir)) return 'No installed skills found';
-    const names = fs.readdirSync(skillsDir).filter((name) => !name.startsWith('.')).sort();
-    return names.length ? ['Installed Skills', ...names.map((name) => `- ${name}`)].join('\n') : 'No installed skills found';
+  handleSkillCommand(chatId, raw, options = {}) {
+    const text = String(raw || '').trim();
+    const skills = listSystemSkills();
+    const page = Math.max(0, Number(options.page) || 0);
+    const pageInfo = paginateItems(skills, page, 4);
+    if (!text || ['list', 'ls'].includes(text.toLowerCase())) {
+      if (!skills.length) return '技能\n当前没有可见 skill。';
+      const enabledCount = skills.filter((skill) => skill.enabled).length;
+      const disabledCount = skills.length - enabledCount;
+      return [
+        '技能',
+        `第 ${pageInfo.page + 1}/${pageInfo.totalPages} 页 · 启用 ${enabledCount} · 停用 ${disabledCount}`,
+        '可用下方按钮查看详情或直接启停。',
+        '',
+        ...pageInfo.items.map((skill, index) => `${pageInfo.page * pageInfo.pageSize + index + 1}. ${skill.enabled ? '🟢' : '⚪'} ${skill.name}\n${skill.backends.join('/')} · ${shortenHomePath(skill.path)}`),
+      ].join('\n');
+    }
+
+    const [sub, rest] = parseParts(text);
+    if (sub === 'show') {
+      if (!rest) return 'Usage\n/skill show <name>';
+      const lowered = rest.toLowerCase();
+      const matches = skills.filter((skill) => String(skill.name || '').toLowerCase() === lowered || String(skill.name || '').toLowerCase().includes(lowered));
+      if (!matches.length) return `Skill not found: ${rest}`;
+      if (matches.length > 1) return `Multiple skills match: ${rest}`;
+      const skill = matches[0];
+      return [
+        '🧩 技能详情',
+        `${skill.name}`,
+        `${skill.enabled ? '🟢 启用' : '⚪ 停用'} · ${skill.backends.join('/')}`,
+        `${shortenHomePath(skill.path)}`,
+      ].join('\n');
+    }
+
+    if (!['enable', 'disable'].includes(sub)) {
+      return '用法\n/skill list\n/skill show <name>\n/skill enable <name>\n/skill disable <name>';
+    }
+    if (!rest) {
+      return `用法\n/skill ${sub} <name>`;
+    }
+
+    try {
+      const updated = setSystemSkillEnabled(rest, sub === 'enable');
+      this.store.clearChatSession(chatId);
+      return [
+        `技能已${updated.enabled ? '启用' : '停用'}：${updated.name}`,
+        `后端：${updated.backends.join('/')}`,
+        '已清空当前 chat 会话，新任务会按新的 skill 状态启动。',
+      ].join('\n');
+    } catch (error) {
+      return `技能更新失败\n原因：${error?.message || String(error)}`;
+    }
+  }
+
+  handleMcpCommand(chatId, raw, options = {}) {
+    const text = String(raw || '').trim();
+    const servers = listSystemMcpServers();
+    const page = Math.max(0, Number(options.page) || 0);
+    const pageInfo = paginateItems(servers, page, 4);
+    if (!text || ['list', 'ls'].includes(text.toLowerCase())) {
+      if (!servers.length) return 'MCP\n当前没有可见 MCP Server。';
+      const enabledCount = servers.filter((server) => server.enabled).length;
+      const disabledCount = servers.length - enabledCount;
+      return [
+        'MCP',
+        `第 ${pageInfo.page + 1}/${pageInfo.totalPages} 页 · 启用 ${enabledCount} · 停用 ${disabledCount}`,
+        '可用下方按钮查看详情或直接启停。',
+        '',
+        ...pageInfo.items.map((server, index) => `${pageInfo.page * pageInfo.pageSize + index + 1}. ${server.enabled ? '🟢' : '⚪'} ${server.name}\n${server.backends.join('/')} · ${(server.command || []).join(' ')}`),
+      ].join('\n');
+    }
+
+    const [sub, rest] = parseParts(text);
+    if (sub === 'show') {
+      if (!rest) return 'Usage\n/mcp show <name>';
+      const lowered = rest.toLowerCase();
+      const matches = servers.filter((server) => String(server.name || '').toLowerCase() === lowered || String(server.name || '').toLowerCase().includes(lowered));
+      if (!matches.length) return `MCP Server 未找到：${rest}`;
+      if (matches.length > 1) return `MCP Server 匹配过多：${rest}`;
+      const server = matches[0];
+      return [
+        '🔌 MCP 详情',
+        `${server.name}`,
+        `${server.enabled ? '🟢 启用' : '⚪ 停用'} · ${server.backends.join('/')}`,
+        ...(server.command?.length ? [truncateText(server.command.join(' '), 180)] : []),
+      ].join('\n');
+    }
+
+    if (!['enable', 'disable'].includes(sub)) {
+      return '用法\n/mcp list\n/mcp show <name>\n/mcp enable <name>\n/mcp disable <name>';
+    }
+    if (!rest) return `用法\n/mcp ${sub} <name>`;
+
+    try {
+      const updated = setSystemMcpEnabled(rest, sub === 'enable');
+      this.store.clearChatSession(chatId);
+      return [
+        `MCP 已${updated.enabled ? '启用' : '停用'}：${updated.name}`,
+        `后端：${updated.backends.join('/')}`,
+        '已清空当前 chat 会话，新任务会按新的 MCP 状态启动。',
+      ].join('\n');
+    } catch (error) {
+      return `MCP 更新失败\n原因：${error?.message || String(error)}`;
+    }
   }
 
   handleSettingCommand() {
-    const codexSdk = this.codexSdk.getDiagnostics();
+    const codexAcp = this.codexAcp.getDiagnostics();
+    const claudeAcp = this.claudeAcp.getDiagnostics();
     const opencodeAcp = this.opencodeAcp.getDiagnostics();
+    const piAcp = this.piAcp.getDiagnostics();
     return [
       `default_backend: ${this.config.defaultBackend}`,
       `auth: ${this.isSecondFactorEnabled() ? `enabled (${formatSeconds(this.config.authTtlSeconds)})` : 'disabled'}`,
@@ -487,14 +894,24 @@ export class RuntimeController {
       `default_workdir: ${this.config.defaultWorkdir}`,
       `default_command_prefix: ${redactedCommandText(this.config.defaultCommandPrefix)}`,
       `codex_command_prefix: ${redactedCommandText(this.config.codexCommandPrefix)}`,
+      `claude_command_prefix: ${redactedCommandText(this.config.claudeCommandPrefix || 'claude-agent-acp')}`,
       `opencode_acp_command_prefix: ${redactedCommandText(this.config.opencodeCommandPrefix)}`,
-      `codex_sdk: ${codexSdk.initialized ? 'initialized' : 'lazy'}`,
-      `codex_model_passthrough: ${codexSdk.modelPassthrough ? 'enabled' : 'disabled'}`,
-      `codex_auth: ${codexSdk.authSource}`,
-      `codex_base_url: ${codexSdk.baseUrlSource}`,
-      ...(codexSdk.lastInitError ? [`codex_last_init_error: ${codexSdk.lastInitError}`] : []),
-      ...(codexSdk.lastResumeSkipReason ? [`codex_last_resume_skip: ${codexSdk.lastResumeSkipReason}`] : []),
-      ...(codexSdk.lastTransientRetryReason ? [`codex_last_transient_retry: ${codexSdk.lastTransientRetryReason}`] : []),
+      `pi_command_prefix: ${redactedCommandText(this.config.piCommandPrefix || 'pi-acp')}`,
+      `codex_acp: ${codexAcp.initialized ? 'initialized' : 'lazy'}`,
+      `codex_acp_agent: ${[codexAcp.agentName, codexAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
+      `codex_acp_auth_methods: ${codexAcp.authMethods?.length ? codexAcp.authMethods.join(', ') : '(none reported)'}`,
+      ...(codexAcp.lastInitError ? [`codex_acp_last_init_error: ${codexAcp.lastInitError}`] : []),
+      ...(codexAcp.lastResumeSkipReason ? [`codex_acp_last_resume_skip: ${codexAcp.lastResumeSkipReason}`] : []),
+      ...(codexAcp.lastPermissionDecision ? [`codex_acp_last_permission: ${codexAcp.lastPermissionDecision}`] : []),
+      ...(codexAcp.lastStopReason ? [`codex_acp_last_stop_reason: ${codexAcp.lastStopReason}`] : []),
+      `claude_acp: ${claudeAcp.initialized ? 'initialized' : 'lazy'}`,
+      `claude_acp_agent: ${[claudeAcp.agentName, claudeAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
+      `claude_acp_auth_methods: ${claudeAcp.authMethods?.length ? claudeAcp.authMethods.join(', ') : '(none reported)'}`,
+      `claude_acp_cli: ${claudeAcp.cliPath || '(not found)'}`,
+      ...(claudeAcp.lastInitError ? [`claude_acp_last_init_error: ${claudeAcp.lastInitError}`] : []),
+      ...(claudeAcp.lastResumeSkipReason ? [`claude_acp_last_resume_skip: ${claudeAcp.lastResumeSkipReason}`] : []),
+      ...(claudeAcp.lastPermissionDecision ? [`claude_acp_last_permission: ${claudeAcp.lastPermissionDecision}`] : []),
+      ...(claudeAcp.lastStopReason ? [`claude_acp_last_stop_reason: ${claudeAcp.lastStopReason}`] : []),
       `opencode_acp: ${opencodeAcp.initialized ? 'initialized' : 'lazy'}`,
       `opencode_agent: ${[opencodeAcp.agentName, opencodeAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
       `opencode_auth_methods: ${opencodeAcp.authMethods?.length ? opencodeAcp.authMethods.join(', ') : '(none reported)'}`,
@@ -502,7 +919,198 @@ export class RuntimeController {
       ...(opencodeAcp.lastResumeSkipReason ? [`opencode_last_resume_skip: ${opencodeAcp.lastResumeSkipReason}`] : []),
       ...(opencodeAcp.lastPermissionDecision ? [`opencode_last_permission: ${opencodeAcp.lastPermissionDecision}`] : []),
       ...(opencodeAcp.lastStopReason ? [`opencode_last_stop_reason: ${opencodeAcp.lastStopReason}`] : []),
+      `pi_acp: ${piAcp.initialized ? 'initialized' : 'lazy'}`,
+      `pi_acp_agent: ${[piAcp.agentName, piAcp.agentVersion].filter(Boolean).join(' ') || '(unknown)'}`,
+      `pi_acp_auth_methods: ${piAcp.authMethods?.length ? piAcp.authMethods.join(', ') : '(none reported)'}`,
+      `pi_acp_cli: ${piAcp.cliPath || '(not found)'}`,
+      ...(piAcp.lastInitError ? [`pi_acp_last_init_error: ${piAcp.lastInitError}`] : []),
+      ...(piAcp.lastResumeSkipReason ? [`pi_acp_last_resume_skip: ${piAcp.lastResumeSkipReason}`] : []),
+      ...(piAcp.lastPermissionDecision ? [`pi_acp_last_permission: ${piAcp.lastPermissionDecision}`] : []),
+      ...(piAcp.lastStopReason ? [`pi_acp_last_stop_reason: ${piAcp.lastStopReason}`] : []),
     ].join('\n');
+  }
+
+  statusLines(chatId, { includeCli = true } = {}) {
+    const backend = this.effectiveBackend(chatId);
+    const controls = this.runtimeControlState(chatId);
+    const lines = [
+      `backend: ${backendLabel(backend)}`,
+      `permission: ${controls.permissionLabel}`,
+      `workdir: ${this.effectiveWorkdir(chatId)}`,
+      `role: ${this.activeRoleName(chatId) || '(none)'}`,
+      `memory: ${this.config.enableMemory ? 'enabled' : 'disabled'}`,
+      `scheduler: ${this.config.enableScheduler ? 'enabled' : 'disabled'}`,
+      `telegram_channels: ${Object.keys(this.config.tgChannelTargets || {}).length}`,
+      `telegram_default_channel: ${this.config.tgDefaultChannel || '(none)'}`,
+      `command: ${this.displayCommandPrefix(chatId)}`,
+      `running: ${this.hasRunningTaskForChat(chatId) ? 'yes' : 'no'}`,
+      `queued: ${this.queuedTaskCount(chatId)}`,
+    ];
+    if (includeCli) lines.push(...this.cliStatusLines());
+    return lines;
+  }
+
+  buildRuntimePanelText(chatId, notice = '', { includeCli = true } = {}) {
+    const lines = [];
+    if (notice) lines.push(notice, '');
+    lines.push('Remote Control', ...this.statusLines(chatId, { includeCli }));
+    return lines.join('\n');
+  }
+
+  cliStatusLines({ checkLatest = false, force = false } = {}) {
+    const snapshot = this.cliTools.getSnapshot({ checkLatest, force });
+    return snapshot.statuses.map((status) => formatCliStatusLine(status));
+  }
+
+  buildCliPanelText(chatId, { notice = '', checkLatest = false, force = false } = {}) {
+    const lines = [];
+    if (notice) lines.push(notice, '');
+    lines.push('CLI 状态', ...this.cliStatusLines({ checkLatest, force }), '', this.buildRuntimePanelText(chatId, '', { includeCli: false }));
+    return lines.join('\n');
+  }
+
+  runCliUpgrade(chatId) {
+    const result = this.cliTools.updateOutdated();
+    return `${summarizeUpdateResult(result)}\n\n${this.buildCliPanelText(chatId, { checkLatest: true, force: true })}`;
+  }
+
+  async handleQuickCommand(action, request) {
+    const chatId = String(request.chatId);
+    const normalized = String(action || '').trim().toLowerCase();
+
+    if (!normalized || normalized === 'status') {
+      return this.buildRuntimePanelText(chatId);
+    }
+    if (normalized === 'setting') {
+      return `${this.handleSettingCommand()}\n\n${this.buildRuntimePanelText(chatId, '', { includeCli: false })}`;
+    }
+    if (normalized === 'cli') {
+      return this.buildCliPanelText(chatId, { checkLatest: true, force: true });
+    }
+    if (normalized === 'skill') {
+      return this.handleSkillCommand(chatId, '');
+    }
+    if (normalized === 'mcp') {
+      return this.handleMcpCommand(chatId, '');
+    }
+    if (normalized === 'role') {
+      return this.handleRoleCommand(chatId, '');
+    }
+    if (normalized === 'memory') {
+      return this.handleMemoryCommand(chatId, '', request);
+    }
+    if (normalized === 'schedule') {
+      return this.handleScheduleCommand(chatId, '');
+    }
+    if (normalized === 'channel') {
+      return this.handleChannelCommand(request, '');
+    }
+    if (normalized === 'cancel') {
+      const task = this.getTaskForChat(chatId);
+      if (!task) return this.buildRuntimePanelText(chatId, '当前没有正在运行的任务。');
+      task.cancel();
+      return this.buildRuntimePanelText(chatId, '已请求取消当前任务。');
+    }
+
+    return this.buildRuntimePanelText(chatId, '未识别的快捷操作。');
+  }
+
+  handleMemoryPanelAction(chatId, action, memoryId) {
+    const memory = this.store.getMemory(chatId, memoryId);
+    if (!memory) return 'Memory not found';
+
+    if (action === 'show') {
+      return [
+        `Memory: ${memory.id}`,
+        `Scope: ${memory.scope}`,
+        `Pinned: ${memory.pinned ? 'yes' : 'no'}`,
+        memory.title ? `Title: ${memory.title}` : '',
+        '',
+        String(memory.content || '').trim(),
+      ].filter(Boolean).join('\n');
+    }
+
+    if (action === 'pin') {
+      const nextPinned = !memory.pinned;
+      this.store.setMemoryPinned(chatId, memoryId, nextPinned);
+      return `Memory ${nextPinned ? 'pinned' : 'unpinned'}\nID: ${memoryId}`;
+    }
+
+    if (action === 'delete') {
+      const deleted = this.store.deleteMemory(chatId, memoryId);
+      return deleted ? `Memory removed\nID: ${memoryId}` : 'Memory not found';
+    }
+
+    return 'Unknown memory action';
+  }
+
+  applyBackendSelection(chatId, value) {
+    const normalized = normalizeBackendAlias(value);
+    if (normalized === 'default') {
+      this.store.clearChatCommandPrefix(chatId);
+      this.store.clearChatSession(chatId);
+      const backend = this.effectiveBackend(chatId);
+      return `已恢复默认后端: ${backendLabel(backend)}（已清空旧会话，后续将新建该后端会话）`;
+    }
+    if (normalized === BACKEND_CODEX) {
+      this.store.setChatCommandPrefix(chatId, this.config.codexCommandPrefix);
+      this.store.clearChatSession(chatId);
+      return `已切到 ${backendLabel(BACKEND_CODEX)}（已清空旧会话）`;
+    }
+    if (normalized === BACKEND_OPENCODE_ACP) {
+      this.store.setChatCommandPrefix(chatId, this.config.opencodeCommandPrefix);
+      this.store.clearChatSession(chatId);
+      return `已切到 ${backendLabel(BACKEND_OPENCODE_ACP)}（已清空旧会话）`;
+    }
+    if (normalized === BACKEND_CLAUDE) {
+      this.store.setChatCommandPrefix(chatId, this.config.claudeCommandPrefix || 'claude-agent-acp');
+      this.store.clearChatSession(chatId);
+      return `已切到 ${backendLabel(BACKEND_CLAUDE)}（已清空旧会话）`;
+    }
+    if (normalized === BACKEND_PI) {
+      this.store.setChatCommandPrefix(chatId, this.config.piCommandPrefix || 'pi-acp');
+      this.store.clearChatSession(chatId);
+      return `已切到 ${backendLabel(BACKEND_PI)}（已清空旧会话）`;
+    }
+    return '';
+  }
+
+  applyPermissionLevel(chatId, value) {
+    const normalized = String(value || '').trim().toLowerCase() === 'acceptedits'
+      ? 'accept'
+      : String(value || '').trim().toLowerCase();
+    const backend = this.effectiveBackend(chatId);
+    const currentPrefix = this.effectiveCommandPrefix(chatId);
+    const knownCodexLevel = isCodexPermissionLevel(normalized);
+    const knownClaudeLevel = isClaudePermissionLevel(normalized);
+
+    if (backend === BACKEND_CODEX && knownCodexLevel) {
+      this.store.setChatCommandPrefix(chatId, buildCodexPermissionPrefix(normalized, this.config, currentPrefix));
+      return `已切到 Codex 权限: ${this.runtimeControlState(chatId).permissionLabel}`;
+    }
+
+    if (backend === BACKEND_CLAUDE && knownClaudeLevel) {
+      this.store.setChatCommandPrefix(chatId, buildClaudePermissionPrefix(normalized, this.config, currentPrefix));
+      return `已切到 Claude 权限: ${this.runtimeControlState(chatId).permissionLabel}`;
+    }
+
+    if (backend === BACKEND_OPENCODE_ACP && (knownCodexLevel || knownClaudeLevel)) {
+      return 'OpenCode ACP 的权限由后端自己控制，当前桥接不提供快捷权限档位。';
+    }
+
+    if ((knownCodexLevel || knownClaudeLevel) && backend !== BACKEND_CODEX && backend !== BACKEND_CLAUDE) {
+      return '当前后端不支持这个快捷权限档位。';
+    }
+
+    if (backend === BACKEND_CODEX && knownClaudeLevel) {
+      return 'Codex 后端只支持 readonly / low / high 快捷权限档位。';
+    }
+
+    if (backend === BACKEND_CLAUDE && knownCodexLevel) {
+      return 'Claude 后端只支持 default / plan / accept 快捷权限档位。';
+    }
+
+    return '';
   }
 
   handleRoleCommand(chatId, raw) {
@@ -604,7 +1212,7 @@ export class RuntimeController {
     if (['list', 'ls'].includes(sub)) {
       const jobs = this.store.listJobs(chatId);
       if (!jobs.length) return 'No scheduled jobs for this chat';
-      return ['Scheduled Jobs', ...jobs.slice(0, 10).map((job) => `${job.id} [${job.enabled ? 'enabled' : 'paused'}] ${job.schedule_type} ${job.schedule_expr} tz=${job.timezone}`)].join('\n');
+      return ['Scheduled Jobs', ...jobs.map((job) => `${job.id} [${job.enabled ? 'enabled' : 'paused'}] ${job.schedule_type} ${job.schedule_expr} tz=${job.timezone}`)].join('\n');
     }
     if (['show', 'get'].includes(sub)) {
       if (!rest) return 'Usage\n/schedule show <job_id>';
@@ -749,6 +1357,9 @@ export class RuntimeController {
     const taskHost = options.taskHost || request.host;
     const taskKey = this.makeTaskKey(taskHost, chatId);
     if (this.hasConflictingRunningTaskForChat(chatId, taskHost)) {
+      if (this.shouldQueueConflictingTask(chatId, taskHost, options)) {
+        return this.enqueueTask(request, sink, { ...options, hostName, taskHost });
+      }
       await sink.final('当前会话已有任务在运行，请稍后重试。');
       return { success: false, skipped: true, summary: 'chat busy', errorText: 'chat already has a running task' };
     }
@@ -776,16 +1387,19 @@ export class RuntimeController {
     console.info(`[runtime] task start(sdk) host=${taskHost} chat=${chatId} cwd=${workdir} prompt=${truncateText(request.text, 120)}`);
     const started = Date.now();
     const abortController = new AbortController();
-    let leadingThinkingActive = true;
-    const thinkingTicker = setInterval(() => {
-      if (!leadingThinkingActive || abortController.signal.aborted) return;
-      sink.progress({
-        status: 'Running',
-        marker: 'thinking',
-        text: 'thinking...',
-        elapsedSeconds: (Date.now() - started) / 1000,
-      }).catch(() => {});
-    }, 1000);
+    const suppressProgress = Boolean(options.suppressProgress);
+    let leadingThinkingActive = !suppressProgress;
+    const thinkingTicker = suppressProgress
+      ? null
+      : setInterval(() => {
+        if (!leadingThinkingActive || abortController.signal.aborted) return;
+        sink.progress({
+          status: 'Running',
+          marker: 'thinking',
+          text: 'thinking...',
+          elapsedSeconds: (Date.now() - started) / 1000,
+        }).catch(() => {});
+      }, 1000);
     this.tasks.set(taskKey, {
       host: taskHost,
       chatId,
@@ -794,14 +1408,20 @@ export class RuntimeController {
     });
 
     try {
-      await sink.progress({ status: 'Running', marker: 'thinking', text: 'thinking...', elapsedSeconds: 0 });
+      this.store.appendConversationMessage?.(chatId, 'user', request.text, { maxItems: 24 });
+      if (!suppressProgress) {
+        await sink.progress({ status: 'Running', marker: 'thinking', text: 'thinking...', elapsedSeconds: 0 });
+      }
       const preparedPrompt = this.buildPrompt(chatId, request.text, options.hostName || request.host, {
         roleName: options.roleName || '',
         memoryScope: options.memoryScope || '',
       });
 
       const backend = detectBackend(commandPrefix);
-      const provider = this.backendProvider(backend);
+      if ((backend === BACKEND_CODEX || backend === BACKEND_CLAUDE || backend === BACKEND_PI) && !isAcpCommandPrefix(commandPrefix, backend)) {
+        throw new Error(`Legacy ${backend} command prefixes are no longer supported. Please switch to ${defaultCommandPrefixForBackend(this.config, backend)}.`);
+      }
+      const provider = this.backendProvider(backend, commandPrefix);
       if (!provider) {
         throw new Error(`Unsupported backend for command prefix: ${commandPrefix}`);
       }
@@ -816,8 +1436,13 @@ export class RuntimeController {
         onPermissionRequest: typeof sink.requestPermission === 'function'
           ? (permissionRequest, meta = {}) => sink.requestPermission(permissionRequest, meta)
           : undefined,
-        onProgress: async (payload) => {
-          const elapsedSeconds = (Date.now() - started) / 1000;
+        onEvent: async (event) => {
+          if (suppressProgress) return;
+          if (shouldSuppressProgressEvent(event, { backend })) return;
+          const payload = this.buildRenderedProgressPayload(request.host, event, {
+            elapsedSeconds: (Date.now() - started) / 1000,
+            workingDirectory: workdir,
+          });
           const previewBody = String(payload?.text || payload?.preview?.summary || payload?.preview?.content || '').trim() || 'thinking...';
           if (payload?.marker !== 'thinking' || previewBody.toLowerCase() !== 'thinking...') {
             leadingThinkingActive = false;
@@ -828,7 +1453,7 @@ export class RuntimeController {
             marker: payload?.marker || 'thinking',
             text: previewBody,
             preview: payload?.preview,
-            elapsedSeconds,
+            elapsedSeconds: Number(payload?.elapsedSeconds) || 0,
           });
         },
       });
@@ -858,6 +1483,7 @@ export class RuntimeController {
         console.info(`[runtime] applied ops host=${taskHost} chat=${chatId} role=${opsResult.counts.role} memory=${opsResult.counts.memory} schedule=${opsResult.counts.schedule}`);
       }
       console.info(`[runtime] task final backend=${backend} host=${taskHost} chat=${chatId} session=${sessionId || '-'} preview=${truncateText(preview, 160)}`);
+      this.store.appendConversationMessage?.(chatId, 'assistant', preview, { maxItems: 24 });
       await sink.final({
         status: 'Done',
         marker: previewInfo.marker,
@@ -870,14 +1496,15 @@ export class RuntimeController {
       const message = error?.message || String(error);
       if (abortController.signal.aborted) {
         await sink.final('任务已取消。');
-        throw error;
+        return { success: false, skipped: true, summary: 'cancelled', errorText: 'cancelled' };
       }
       await sink.final(clip(`Task failed\nReason: ${message}`));
       return { success: false, summary: message, errorText: message };
     } finally {
       leadingThinkingActive = false;
-      clearInterval(thinkingTicker);
+      if (thinkingTicker) clearInterval(thinkingTicker);
       this.tasks.delete(taskKey);
+      this.drainTaskQueue(chatId);
     }
   }
 
@@ -897,6 +1524,7 @@ export class RuntimeController {
     }, sink, {
       hostName: options.hostName || 'scheduled runtime',
       taskHost: options.taskHost || 'scheduler',
+      suppressProgress: Object.prototype.hasOwnProperty.call(options, 'suppressProgress') ? options.suppressProgress : true,
       roleName: String(job.role || '').trim(),
       memoryScope: String(job.memory_scope || '').trim() || this.defaultMemoryScope(chatId),
       workdir: String(job.workdir || '').trim() || this.effectiveWorkdir(chatId),

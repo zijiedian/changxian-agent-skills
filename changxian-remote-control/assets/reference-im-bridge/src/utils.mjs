@@ -2,8 +2,9 @@ const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const CONFIG_CONTEXT_NOISE_RE = /^(?:workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|reasoning summaries:|session id:|mcp startup:)/i;
 const SENSITIVE_OPTION_RE = /(token|secret|passphrase|password|authorization|auth|api[-_]?key|cookie|session|bearer)/i;
 const LONG_SECRET_RE = /^[A-Za-z0-9_\-]{24,}$/;
-const TRACE_MARKERS = new Set(['assistant', 'codex', 'thinking', 'exec', 'user']);
+const TRACE_MARKERS = new Set(['assistant', 'codex', 'thinking', 'reasoning', 'exec', 'user', 'final_answer', 'text']);
 const TRACE_SKIP_SECTION_MARKERS = new Set(['user']);
+const INLINE_TRACE_MARKERS = ['assistant', 'codex', 'thinking', 'reasoning', 'final_answer'];
 const INTERNAL_RUNTIME_NOISE_PATTERNS = [
   /apply_patch was requested via exec_command/i,
   /use the apply_patch tool instead of exec_command/i,
@@ -48,6 +49,53 @@ function isInternalRuntimeNoiseLine(line) {
   return INTERNAL_RUNTIME_NOISE_PATTERNS.some((pattern) => pattern.test(stripped));
 }
 
+function isLeakedSkillInventoryHeading(line) {
+  return /^(?:#{1,6}\s*)?skills\s*:?\s*$/i.test(String(line || '').trim());
+}
+
+function isLeakedSkillInventoryEntry(line) {
+  const stripped = String(line || '').trim();
+  if (!stripped || !/SKILL\.md\b/i.test(stripped)) return false;
+  return /^[-*+]\s+/.test(stripped)
+    || stripped.startsWith('/')
+    || /^\[[^\]]+\]\((?:\/|file:)/i.test(stripped);
+}
+
+function stripLeakedSkillInventory(text) {
+  const lines = String(text || '').split('\n');
+  const output = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!isLeakedSkillInventoryHeading(line)) {
+      output.push(line);
+      continue;
+    }
+
+    let cursor = index + 1;
+    while (cursor < lines.length && !lines[cursor].trim()) cursor += 1;
+
+    let entryCount = 0;
+    while (cursor < lines.length && isLeakedSkillInventoryEntry(lines[cursor])) {
+      entryCount += 1;
+      cursor += 1;
+    }
+
+    if (!entryCount) {
+      output.push(line);
+      continue;
+    }
+
+    while (cursor < lines.length && !lines[cursor].trim()) cursor += 1;
+    index = cursor - 1;
+  }
+
+  return output.join('\n')
+    .replace(/^(?:#{1,6}\s*)?skills\b[^\n]*SKILL\.md[^\n]*$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function cleanOutput(output) {
   const text = String(output || '')
     .replace(ANSI_ESCAPE_RE, '')
@@ -64,7 +112,7 @@ export function cleanOutput(output) {
     compact.push(line);
     previous = line;
   }
-  return compact.join('\n').trim();
+  return stripLeakedSkillInventory(compact.join('\n'));
 }
 
 function normalizeTraceMarker(line) {
@@ -129,6 +177,20 @@ function parseTraceSections(lines) {
     sections.push({ marker: currentMarker, content: currentLines.join('\n').trim() });
   }
   return sections;
+}
+
+function normalizeInlineTraceSections(text) {
+  const normalized = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+  const markerPattern = INLINE_TRACE_MARKERS.join('|');
+  const inlineMarkerRe = new RegExp(`(^|\\n|[。！？.!?]\\s*)(${markerPattern})([:：]?\\s*)(?=\\S)`, 'gmi');
+  return normalized.replace(inlineMarkerRe, (_match, prefix, marker) => {
+    const boundary = prefix === '' || prefix === '\n'
+      ? prefix
+      : `${String(prefix).trimEnd()}\n`;
+    return `${boundary}${marker}\n`;
+  });
 }
 
 function latestSection(sections, markers) {
@@ -560,6 +622,7 @@ function buildRunningPreviewFromSections(sections) {
 
 export function extractPreview(output, status = 'Done') {
   const cleaned = cleanOutput(output);
+  const normalizedSectionsInput = normalizeInlineTraceSections(cleaned);
   if (!cleaned) {
     return {
       marker: status === 'Running' ? 'thinking' : 'assistant',
@@ -567,16 +630,20 @@ export function extractPreview(output, status = 'Done') {
     };
   }
 
-  const sections = parseTraceSections(cleaned.split('\n'));
+  const sections = parseTraceSections(normalizedSectionsInput.split('\n'));
   if (status === 'Running') {
     const combined = buildRunningPreviewFromSections(sections);
     if (combined) {
       return combined;
     }
   } else {
-    const assistant = latestSection(sections, new Set(['assistant', 'codex']));
+    const assistant = latestSection(sections, new Set(['assistant', 'codex', 'final_answer', 'text']));
     if (assistant) {
       return { marker: assistant.marker, content: normalizePreviewContent(trimSectionTailNoise(assistant.content)) };
+    }
+    const reasoning = latestSection(sections, new Set(['reasoning']));
+    if (reasoning) {
+      return { marker: 'assistant', content: normalizePreviewContent(trimSectionTailNoise(reasoning.content)) };
     }
     const exec = latestSection(sections, new Set(['exec']));
     if (exec) {
@@ -1301,6 +1368,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
   const maxChecks = Math.max(0, Number(options.maxChecks) || 0);
   const maxFiles = Math.max(0, Number(options.maxFiles) || 0);
   const maxNotes = Math.max(0, Number(options.maxNotes) || 0);
+  const showOverflowCounts = options.showOverflowCounts !== false;
   const lines = [];
 
   if (heading) lines.push(`**${heading}**`);
@@ -1312,7 +1380,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
       lines.push(`- ${item}`);
     }
     const extraHighlights = value.highlights.length - Math.min(value.highlights.length, maxHighlights);
-    if (extraHighlights > 0) lines.push(`- 还有 ${extraHighlights} 条摘要`);
+    if (showOverflowCounts && extraHighlights > 0) lines.push(`- 还有 ${extraHighlights} 条摘要`);
   }
 
   if (maxFiles > 0 && value.changedFiles.length) {
@@ -1322,7 +1390,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
       lines.push(`- ${file}`);
     }
     const extraFiles = value.changedFiles.length - Math.min(value.changedFiles.length, maxFiles);
-    if (extraFiles > 0) lines.push(`- 还有 ${extraFiles} 个文件`);
+    if (showOverflowCounts && extraFiles > 0) lines.push(`- 还有 ${extraFiles} 个文件`);
   }
 
   if (maxChecks > 0 && value.checks.length) {
@@ -1332,7 +1400,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
       lines.push(`- ${item}`);
     }
     const extraChecks = value.checks.length - Math.min(value.checks.length, maxChecks);
-    if (extraChecks > 0) lines.push(`- 还有 ${extraChecks} 条验证结果`);
+    if (showOverflowCounts && extraChecks > 0) lines.push(`- 还有 ${extraChecks} 条验证结果`);
   }
 
   if (maxNotes > 0 && value.notes.length) {
@@ -1341,7 +1409,7 @@ export function buildPreviewSummaryMarkdown(preview, options = {}) {
       lines.push(item);
     }
     const extraNotes = value.notes.length - Math.min(value.notes.length, maxNotes);
-    if (extraNotes > 0) lines.push(`还有 ${extraNotes} 条补充说明。`);
+    if (showOverflowCounts && extraNotes > 0) lines.push(`还有 ${extraNotes} 条补充说明。`);
   }
 
   if (value.diffBlocks.length && options.includeDiffHint !== false) {
@@ -1478,6 +1546,9 @@ function normalizeRunningTraceMarkdown(text) {
   value = value
     .replace(/(^|\n)thinking\.\.\.(?=\n|$)/gi, '$1思考中...')
     .replace(/(^|\n)thinking(?=\n|$)/gi, '$1**思考**')
+    .replace(/(^|\n)reasoning(?=\n|$)/gi, '$1**推理**')
+    .replace(/(^|\n)final_answer(?=\n|$)/gi, '$1**输出**')
+    .replace(/(^|\n)text(?=\n|$)/gi, '$1**输出**')
     .replace(/(^|\n)(assistant|codex)(?=\n|$)/gi, '$1**输出**')
     .replace(/(^|\n)exec(?=\n|$)/gi, '$1');
   value = normalizePreviewContent(value);

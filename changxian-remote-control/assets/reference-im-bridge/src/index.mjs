@@ -7,6 +7,7 @@ import { StateStore } from './store.mjs';
 import { RuntimeController } from './controller.mjs';
 import { startTelegramAdapter } from './adapters.telegram.mjs';
 import { startWeComAdapter } from './adapters.wecom.mjs';
+import { startWeixinAdapter } from './adapters.weixin.mjs';
 import { setupBridgeLogger, closeBridgeLogger } from './logger.mjs';
 import { runCommandPreflight } from './preflight.mjs';
 import { SchedulerRuntime } from './scheduler.mjs';
@@ -28,17 +29,23 @@ store.normalizeLegacyWorkdirs({
     path.join(config.defaultWorkdir, 'changxian-agent-skills/changxian-remote-control/assets/reference-wecom-bot-bridge'),
   ],
 });
+store.normalizeLegacyCommandPrefixes({
+  codexCommandPrefix: config.codexCommandPrefix,
+  claudeCommandPrefix: config.claudeCommandPrefix,
+  piCommandPrefix: config.piCommandPrefix,
+});
 const controller = new RuntimeController(config, store);
 const adapters = [];
 const adapterMap = {};
 let readinessTimer = null;
 const requestedAdapters = [];
 const defaultCommandPreflight = runCommandPreflight({
-  commandPrefix: config.codexCommandPrefix,
+  commandPrefix: config.defaultCommandPrefix,
   workdir: config.defaultWorkdir,
 });
 if (config.tgBotToken) requestedAdapters.push('telegram');
 if (config.wecomBotId && config.wecomBotSecret) requestedAdapters.push('wecom');
+if (config.weixinEnabled) requestedAdapters.push('weixin');
 
 const bootState = {
   startedAt: new Date(startedAtMs).toISOString(),
@@ -81,7 +88,10 @@ function bootSnapshot() {
     ),
     diagnostics: {
       defaultCommandPreflight: { ...bootState.diagnostics.defaultCommandPreflight },
-      codexSdk: controller.codexSdk.getDiagnostics(),
+      codexAcp: controller.codexAcp.getDiagnostics(),
+      claudeAcp: controller.claudeAcp.getDiagnostics(),
+      opencodeAcp: controller.opencodeAcp.getDiagnostics(),
+      piAcp: controller.piAcp.getDiagnostics(),
     },
   };
 }
@@ -171,7 +181,10 @@ const server = http.createServer((req, res) => {
       scheduler: schedulerState,
       diagnostics: {
         defaultCommandPreflight: { ...bootState.diagnostics.defaultCommandPreflight },
-        codexSdk: controller.codexSdk.getDiagnostics(),
+        codexAcp: controller.codexAcp.getDiagnostics(),
+        claudeAcp: controller.claudeAcp.getDiagnostics(),
+        opencodeAcp: controller.opencodeAcp.getDiagnostics(),
+        piAcp: controller.piAcp.getDiagnostics(),
       },
     }));
     return;
@@ -194,6 +207,7 @@ void (async () => {
   await Promise.all([
     config.tgBotToken ? launchAdapter('telegram', () => startTelegramAdapter(config, controller)) : Promise.resolve(),
     config.wecomBotId && config.wecomBotSecret ? launchAdapter('wecom', () => startWeComAdapter(config, controller)) : Promise.resolve(),
+    config.weixinEnabled ? launchAdapter('weixin', () => startWeixinAdapter(config, controller)) : Promise.resolve(),
   ]);
   bootState.launchCompletedAt = new Date().toISOString();
   scheduler.start();

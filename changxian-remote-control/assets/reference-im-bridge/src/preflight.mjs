@@ -2,12 +2,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
-import { detectBackend, BACKEND_CODEX } from './backend-detection.mjs';
+import {
+  BACKEND_CLAUDE,
+  BACKEND_CODEX,
+  BACKEND_OPENCODE_ACP,
+  BACKEND_PI,
+  detectBackend,
+  isAcpCommandPrefix,
+} from './backend-detection.mjs';
 import { redactedCommandText, splitShellArgs } from './utils.mjs';
 
-const REMOTE_CONTROL_ENV_RE = /^(?:TG_|WECOM_|RC_AUTH_|RC_CODEX_|RC_OPENCODE_|RC_DEFAULT_BACKEND$|RC_HOST$|RC_PORT$|RC_ENABLE_|RC_MEMORY_|RC_SCHEDULER_|RC_REPLY_|RC_MAX_|RC_DEFAULT_TIMEZONE$|OPENCODE_ACP_)/;
+const REMOTE_CONTROL_ENV_RE = /^(?:TG_|WECOM_|RC_AUTH_|RC_CODEX_|RC_CLAUDE_|RC_OPENCODE_|RC_PI_|RC_DEFAULT_BACKEND$|RC_HOST$|RC_PORT$|RC_ENABLE_|RC_MEMORY_|RC_SCHEDULER_|RC_REPLY_|RC_MAX_|RC_DEFAULT_TIMEZONE$|OPENCODE_ACP_)/;
 const VERSION_PROBE_ARGS = [['--version'], ['version'], ['-v']];
+const ACP_VERSION_PROBE_ARGS = [['--version'], ['version'], ['-v'], ['--help'], ['-h']];
 const CODEX_AUTH_PROBE_ARGS = [['login', 'status'], ['auth', 'status']];
+const CLAUDE_AUTH_PROBE_ARGS = [['auth', 'status']];
 
 function firstLine(text) {
   return String(text || '')
@@ -70,6 +79,7 @@ export function runCommandPreflight(options = {}) {
   const args = splitShellArgs(commandPrefix);
   const executable = args[0] || '';
   const backend = detectBackend(commandPrefix);
+  const acpManaged = isAcpCommandPrefix(commandPrefix, backend);
   const checks = [];
 
   const pushCheck = (name, ok, detail, severity = ok ? 'info' : 'error') => {
@@ -81,8 +91,16 @@ export function runCommandPreflight(options = {}) {
   pushCheck('workdir', fs.existsSync(workdir) && fs.statSync(workdir).isDirectory(), workdir);
   pushCheck(
     'backend',
-    backend === BACKEND_CODEX || backend === 'opencode-acp',
-    backend === BACKEND_CODEX ? 'codex sdk' : backend === 'opencode-acp' ? 'opencode acp' : 'unsupported command prefix',
+    backend === BACKEND_CODEX || backend === BACKEND_CLAUDE || backend === BACKEND_OPENCODE_ACP || backend === BACKEND_PI,
+    backend === BACKEND_CODEX
+      ? (acpManaged ? 'codex acp' : 'codex sdk')
+      : backend === BACKEND_CLAUDE
+        ? (acpManaged ? 'claude acp' : 'claude sdk')
+        : backend === BACKEND_OPENCODE_ACP
+          ? 'opencode acp'
+          : backend === BACKEND_PI
+            ? (acpManaged ? 'pi acp' : 'pi cli')
+            : 'unsupported command prefix',
   );
 
   if (args.some((arg) => /<[^>]+>/.test(arg))) {
@@ -95,18 +113,24 @@ export function runCommandPreflight(options = {}) {
   let version = '';
   let versionOk = false;
   if (resolvedPath) {
-    for (const probeArgs of VERSION_PROBE_ARGS) {
+    const probeArgsList = acpManaged ? ACP_VERSION_PROBE_ARGS : VERSION_PROBE_ARGS;
+    for (const probeArgs of probeArgsList) {
       const probe = runProbe(resolvedPath, probeArgs, env);
       if (!probe.ok) continue;
       version = firstLine(probe.stdout || probe.stderr);
       versionOk = true;
       break;
     }
-    pushCheck('version', versionOk, version || `failed to query version for ${resolvedPath}`);
+    pushCheck(
+      'version',
+      versionOk,
+      version || (acpManaged ? `${path.basename(resolvedPath)} ready` : `failed to query version for ${resolvedPath}`),
+      versionOk ? 'info' : (acpManaged ? 'warn' : 'error'),
+    );
   }
 
   let auth = '';
-  if (includeAuthProbe && resolvedPath && backend === BACKEND_CODEX) {
+  if (includeAuthProbe && resolvedPath && backend === BACKEND_CODEX && !acpManaged) {
     let authOk = false;
     for (const probeArgs of CODEX_AUTH_PROBE_ARGS) {
       const probe = runProbe(resolvedPath, probeArgs, env);
@@ -117,6 +141,18 @@ export function runCommandPreflight(options = {}) {
     }
     if (auth) {
       pushCheck('auth', authOk, auth || 'codex login status failed', authOk ? 'info' : 'warn');
+    }
+  } else if (includeAuthProbe && resolvedPath && backend === BACKEND_CLAUDE && !acpManaged) {
+    let authOk = false;
+    for (const probeArgs of CLAUDE_AUTH_PROBE_ARGS) {
+      const probe = runProbe(resolvedPath, probeArgs, env);
+      auth = firstLine(probe.stdout || probe.stderr || probe.error);
+      if (!probe.ok) continue;
+      authOk = /loggedIn.*true|logged.in/i.test(`${probe.stdout}\n${probe.stderr}`);
+      break;
+    }
+    if (auth) {
+      pushCheck('auth', authOk, auth || "run 'claude auth login'", authOk ? 'info' : 'warn');
     }
   }
 

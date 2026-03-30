@@ -1,6 +1,6 @@
 ---
 name: changxian-remote-control
-description: Operate changxian-agent through Telegram, WeCom, chat bots, webhooks, or other remote-host bridges, including bridge runtime management plus bridge-backed durable memory, reusable roles, scheduled jobs, Telegram channel publishing, and backend switching between Codex SDK and OpenCode ACP. Use when the user asks to enable remote control, start or restart the bridge runtime, inspect remote health or adapter status, change remote workdir/runtime settings, switch the bridge backend to OpenCode ACP, run tasks through a remote host instead of the local terminal, publish or preview content for a Telegram channel, or when a turn includes `[MEMORY STATE]`, `[ROLE STATE]`, `[SCHEDULE STATE]`, or asks to remember, forget, pin, unpin, create roles, switch roles, or create, update, pause, resume, trigger, immediately execute, rerun, run now, or delete scheduled jobs through the bridge.
+description: "Operate changxian-agent through Telegram, WeCom, and related remote bridges, including runtime management, durable memory, reusable roles, scheduled jobs, Telegram channel publishing, and backend switching across Claude, Codex, OpenCode ACP, and Pi. Use for remote-control setup or status, backend or workdir changes, remote task execution, memory or role updates, schedule management, Telegram channel preview or publish, or when a turn includes `[MEMORY STATE]`, `[ROLE STATE]`, or `[SCHEDULE STATE]`."
 ---
 
 # Changxian Remote Control
@@ -21,6 +21,7 @@ Use this skill for both remote-host bridge behavior and the persistent bridge st
 - Prefer incremental updates over long monologues.
 - Keep the final handoff action-oriented.
 - When Telegram channel publishing is involved, distinguish clearly between preview and live publish.
+- Do not tell the user to use `/run`; plain text input already executes normally unless it starts with a slash command.
 
 ## Quick Start
 
@@ -29,12 +30,14 @@ Use this skill for both remote-host bridge behavior and the persistent bridge st
 - Prefer the bundled JavaScript runtime in `assets/reference-im-bridge/` unless the host explicitly uses another deployment.
 - Treat runtime config, state dir, PID, and health endpoint as the minimum facts to report back after startup work.
 - When the request is about publishing to Telegram channels, verify that channel aliases are configured before attempting to publish.
-- When the request is about OpenCode through Telegram or WeCom, confirm whether the bridge should use `codex` or `opencode-acp`, then load the OpenCode ACP reference before changing config or backend selection.
+- When the request is about backend switching through Telegram or WeCom, confirm whether the bridge should use `claude`, `codex`, `opencode-acp`, or `pi`, then load the matching backend reference before changing config or backend selection.
 
 ## Persistent State
 
 - Treat `[MEMORY STATE]`, `[ROLE STATE]`, and `[SCHEDULE STATE]` as the authoritative saved state for the current bridge scope.
 - Keep durable memory for stable preferences, facts, and constraints. Do not save secrets or one-off task details.
+- When recent dialogue clearly reveals a durable preference, stable project fact, owned resource, recurring constraint, default language/style choice, or long-lived operating habit, prefer saving or updating memory even if the user did not literally say “remember this”.
+- When auto memory extraction is enabled, prefer updating an existing memory over creating a near-duplicate. Reuse the closest matching memory when the new turn obviously refines the same fact.
 - Keep saved roles reusable and stable across turns. Use lowercase hyphenated role names.
 - Keep schedules explicit and auditable. Prefer concrete `once`, `every`, or `cron` expressions.
 - If the user asks to run a scheduled job right now, prefer `run_job` against the existing job instead of rewriting its schedule.
@@ -55,6 +58,11 @@ Use this skill for both remote-host bridge behavior and the persistent bridge st
 
 When bridge-backed state should change, append exactly one fenced ops block for the changed state at the very end of the answer.
 
+For memory specifically, this can happen in two modes:
+
+- explicit mode: the user asked to remember, forget, pin, or update memory
+- auto mode: the dialogue itself revealed a durable memory-worthy fact and saving it will improve future turns
+
 Memory:
 
 ```rc-memory-ops
@@ -62,6 +70,12 @@ Memory:
 ```
 
 Supported ops: `upsert`, `delete`, `pin`, `unpin`
+
+For `upsert`, prefer these target rules:
+
+- use `memory_id` when the exact memory is already known
+- otherwise use `query` or `contains` to target the closest existing memory and refine it
+- if nothing matches, create a new memory
 
 Role:
 
@@ -93,6 +107,8 @@ Immediate run example:
 - If the host supports scheduled execution, make scheduled prompts self-contained and deterministic.
 - If a capability is absent, adapt the workflow instead of pretending it exists.
 - For Telegram channel publishing, only use preconfigured aliases and never invent or guess raw channel ids.
+- If the runtime exposes recent dialogue context, use it to decide whether a memory candidate is truly durable before emitting `rc-memory-ops`.
+- If the user wants to inspect or control installed skills or MCP servers, use `/skill` and `/mcp` style workflows instead of treating them as generic text tasks.
 
 ## References
 
@@ -101,7 +117,10 @@ Resolve relative paths against this skill directory, not the current runtime wor
 - `references/host-bridge-contract.md` for the generic host capability model.
 - `references/telegram-adapter-example.md` for one Telegram-style adapter profile.
 - `references/telegram-operations.md` for day-to-day Telegram operations including channel publishing.
+- `references/memory-autosave.md` for the auto memory extraction rules, merge heuristics, and safe examples.
 - `references/opencode-acp.md` for switching the bridge to OpenCode ACP and configuring the ACP command prefix.
+- `references/pi-backend.md` for switching the bridge to Pi ACP and configuring the Pi command prefix.
+- `references/claude-backend.md` for switching to Claude ACP backend and configuring the Claude command prefix.
 - `references/wecom-adapter-example.md` for one WeCom intelligent robot profile.
 - `references/standalone-install.md` for the JavaScript standalone runtime layout and startup flow.
 
@@ -132,3 +151,7 @@ Resolve relative paths against this skill directory, not the current runtime wor
 - “以后默认在这个目录下远程处理这个项目。”
 - “我给你发一张截图，你帮我远程定位问题。”
 - “把接下来的执行过程用适合手机阅读的短进度更新返回给我。”
+- “切换到 Claude 后端。”
+- “切回 Codex 后端。”
+- “切到 Pi 后端。”
+- “查看当前后端状态。”

@@ -9,6 +9,12 @@
     "status": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts status",
     "logs": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts logs",
     "doctor": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts doctor",
-    "health": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts health"
+    "health": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts health",
+    "weixin-login": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts weixin-login",
+    "weixin-start": "node --no-warnings --experimental-strip-types ./scripts/remote-control.ts weixin-start",
+    "test": "node --no-warnings --experimental-strip-types --test ./tests/*.test.ts"
+  },
+  "dependencies": {
+    "weixin-agent-sdk": "^0.1.0"
   }
 }
