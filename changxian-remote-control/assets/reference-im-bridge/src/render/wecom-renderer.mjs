@@ -355,3 +355,13 @@ export class WeComRenderer extends BaseRenderer {
     return pages.length ? pages : ['暂无输出'];
   }
 }
+
+// ============================================================================
+// 遗留兼容导出
+// ============================================================================
+
+const renderer = new WeComRenderer();
+
+export function renderWeComPayload(payload) {
+  return renderer.renderLegacyPayload(payload);
+}

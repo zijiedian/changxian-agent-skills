@@ -10,6 +10,9 @@ export { WeComRenderer } from './wecom-renderer.mjs';
 // 消息转换器
 export { MessageTransformer } from './message-transformer.mjs';
 
+// 格式模块
+export * from './format/index.mjs';
+
 // ============================================================================
 // 便捷工厂函数
 // ============================================================================
@@ -49,22 +52,11 @@ export function createMessageTransformer(tunnelService) {
 // ============================================================================
 
 // 从 telegram-renderer 重新导出
-import { TelegramRenderer, markdownToTelegramHtml, coerceTelegramHtml, renderTelegramPayload } from './telegram-renderer.mjs';
-export { renderTelegramPayload, coerceTelegramHtml };
-
-// 从 wecom-renderer 重新导出
-import { WeComRenderer as WCRenderer, renderWeComPayload } from './wecom-renderer.mjs';
-export { renderWeComPayload };
+export { markdownToTelegramHtml, coerceTelegramHtml } from './telegram-renderer.mjs';
 
 // ============================================================================
 // 常量导出
 // ============================================================================
-
-export const DISPLAY_VERBOSITY = {
-  LOW: 'low',
-  MEDIUM: 'medium',
-  HIGH: 'high',
-};
 
 export const OUTGOING_MESSAGE_TYPES = {
   TEXT: 'text',

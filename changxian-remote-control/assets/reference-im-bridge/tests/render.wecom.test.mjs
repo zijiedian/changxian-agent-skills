@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { renderWeComPayload } from '../src/render/index.mjs';
+import { renderWeComPayload } from '../src/render/wecom-renderer.mjs';
 
 test('running wecom payload stays concise and keeps tool/check info', () => {
   const rendered = renderWeComPayload({

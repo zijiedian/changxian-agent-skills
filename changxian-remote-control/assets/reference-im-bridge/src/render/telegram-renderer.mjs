@@ -328,6 +328,62 @@ function formatToolSummary(name, rawInput, displaySummary) {
 // TelegramRenderer 类
 // ============================================================================
 
+/**
+ * 格式化工具调用（带 Viewer Links）
+ */
+function formatToolCall(meta, verbosity) {
+  const icon = resolveToolIcon(meta);
+  const name = meta.name || 'Tool';
+  const label = verbosity === 'low'
+    ? formatToolTitle(name, meta.rawInput, meta.displayTitle)
+    : formatToolSummary(name, meta.rawInput, meta.displaySummary);
+  let text = `${icon} <b>${escapeHtml(label)}</b>`;
+  text += formatViewerLinks(meta.viewerLinks, meta.viewerFilePath);
+  if (verbosity === 'high') {
+    text += formatHighDetails(meta.rawInput, meta.content);
+  }
+  return text;
+}
+
+/**
+ * 格式化 Viewer Links
+ * @param {Object} links
+ * @param {string} [filePath]
+ * @returns {string}
+ */
+function formatViewerLinks(links, filePath) {
+  if (!links) return '';
+  const fileName = filePath ? filePath.split('/').pop() || filePath : '';
+  let text = '\n';
+  if (links.file) {
+    text += `\n📄 <a href="${escapeHtml(links.file)}">View ${escapeHtml(fileName || 'file')}</a>`;
+  }
+  if (links.diff) {
+    text += `\n📝 <a href="${escapeHtml(links.diff)}">View diff${fileName ? ` — ${escapeHtml(fileName)}` : ''}</a>`;
+  }
+  return text;
+}
+
+/**
+ * 格式化高详细度详情
+ */
+function formatHighDetails(rawInput, content) {
+  let text = '';
+  if (rawInput) {
+    const inputStr = typeof rawInput === 'string' ? rawInput : JSON.stringify(rawInput, null, 2);
+    if (inputStr && inputStr !== '{}') {
+      text += `\n<b>Input:</b>\n<pre>${escapeHtml(inputStr.slice(0, 3800))}</pre>`;
+    }
+  }
+  if (content) {
+    const details = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+    if (details && details !== '{}') {
+      text += `\n<b>Output:</b>\n<pre>${escapeHtml(details.slice(0, 3800))}</pre>`;
+    }
+  }
+  return text;
+}
+
 export class TelegramRenderer extends BaseRenderer {
   /**
    * 渲染文本消息 - Markdown 转 HTML
@@ -344,13 +400,8 @@ export class TelegramRenderer extends BaseRenderer {
    */
   renderToolCall(content, verbosity) {
     const meta = (content.metadata ?? {});
-    const icon = resolveToolIcon(meta);
-    const name = meta.name || content.text || 'Tool';
-    const label = verbosity === 'low'
-      ? formatToolTitle(name, meta.rawInput, meta.displayTitle)
-      : formatToolSummary(name, meta.rawInput, meta.displaySummary);
     return {
-      body: `${icon} ${escapeHtml(label)}`,
+      body: formatToolCall(meta, verbosity),
       format: 'html',
     };
   }
@@ -360,13 +411,8 @@ export class TelegramRenderer extends BaseRenderer {
    */
   renderToolUpdate(content, verbosity) {
     const meta = (content.metadata ?? {});
-    const icon = resolveToolIcon(meta);
-    const name = meta.name || content.text || 'Tool';
-    const label = verbosity === 'low'
-      ? formatToolTitle(name, meta.rawInput, meta.displayTitle)
-      : formatToolSummary(name, meta.rawInput, meta.displaySummary);
     return {
-      body: `${icon} ${escapeHtml(label)}`,
+      body: formatToolCall(meta, verbosity),
       format: 'html',
     };
   }
@@ -635,4 +681,14 @@ export class TelegramRenderer extends BaseRenderer {
   coerceTelegramHtml(text) {
     return coerceTelegramHtml(text);
   }
+}
+
+// ============================================================================
+// 遗留兼容导出
+// ============================================================================
+
+const renderer = new TelegramRenderer();
+
+export function renderTelegramPayload(payload) {
+  return renderer.renderLegacyPayload(payload);
 }
