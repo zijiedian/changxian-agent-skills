@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { WSClient, generateReqId } from '@wecom/aibot-node-sdk';
-import { renderWeComPayload } from './render.wecom.mjs';
+import { renderWeComPayload } from '../render/wecom.mjs';
 
 function errorText(error) {
   return error?.message ? String(error.message) : String(error);

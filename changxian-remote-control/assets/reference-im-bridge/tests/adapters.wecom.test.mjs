@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createWeComReplySink } from '../src/adapters.wecom.mjs';
+import { createWeComReplySink } from '../src/adapters/wecom.mjs';
 
 function createClient() {
   const calls = [];

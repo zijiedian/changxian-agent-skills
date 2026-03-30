@@ -5,7 +5,7 @@ import {
   buildPermissionPromptText,
   createTelegramPermissionRegistry,
   permissionOptionLabel,
-} from '../src/telegram-permission-prompt.mjs';
+} from '../src/adapters/telegram/permission-prompt.mjs';
 
 test('permissionOptionLabel maps ACP kinds to Chinese labels', () => {
   assert.equal(permissionOptionLabel({ kind: 'allow_once' }), '允许一次');

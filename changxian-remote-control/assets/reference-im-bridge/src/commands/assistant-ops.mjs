@@ -1,5 +1,5 @@
 import { OPS_RES, extractOps } from './ops.mjs';
-import { computeNextRun, normalizeScheduleSpec } from './scheduler.mjs';
+import { computeNextRun, normalizeScheduleSpec } from '../core/scheduler.mjs';
 
 function clipInline(text, limit = 72) {
   const value = String(text || '').replace(/\s+/g, ' ').trim();

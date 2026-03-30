@@ -3,14 +3,14 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { loadConfig } from './config.mjs';
-import { StateStore } from './store.mjs';
-import { RuntimeController } from './controller.mjs';
-import { startTelegramAdapter } from './adapters.telegram.mjs';
-import { startWeComAdapter } from './adapters.wecom.mjs';
-import { startWeixinAdapter } from './adapters.weixin.mjs';
-import { setupBridgeLogger, closeBridgeLogger } from './logger.mjs';
-import { runCommandPreflight } from './preflight.mjs';
-import { SchedulerRuntime } from './scheduler.mjs';
+import { StateStore } from './core/store.mjs';
+import { RuntimeController } from './core/controller.mjs';
+import { startTelegramAdapter } from './adapters/telegram/index.mjs';
+import { startWeComAdapter } from './adapters/wecom.mjs';
+import { startWeixinAdapter } from './adapters/weixin.mjs';
+import { setupBridgeLogger, closeBridgeLogger } from './utils/logger.mjs';
+import { runCommandPreflight } from './utils/preflight.mjs';
+import { SchedulerRuntime } from './core/scheduler.mjs';
 
 const startedAtMs = Date.now();
 const config = loadConfig();

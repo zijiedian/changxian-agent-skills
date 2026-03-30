@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { RuntimeController } from '../src/controller.mjs';
-import { StateStore } from '../src/store.mjs';
-import { applyAssistantOps } from '../src/assistant_ops.mjs';
+import { RuntimeController } from '../src/core/controller.mjs';
+import { StateStore } from '../src/core/store.mjs';
+import { applyAssistantOps } from '../src/commands/assistant-ops.mjs';
 
 function makeTempStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-memory-autosave-'));

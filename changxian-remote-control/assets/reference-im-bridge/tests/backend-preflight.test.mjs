@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { runCommandPreflight } from '../src/preflight.mjs';
+import { runCommandPreflight } from '../src/utils/preflight.mjs';
 
 test('runCommandPreflight recognizes opencode acp backend', () => {
   const result = runCommandPreflight({

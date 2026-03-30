@@ -3,12 +3,12 @@ import {
   buildStructuredPreview,
   previewHasProgressDetails,
   truncateText,
-} from './utils.mjs';
+} from '../utils/utils.mjs';
 import {
   TelegramRenderer,
   markdownToTelegramHtml,
   coerceTelegramHtml,
-} from './render/telegram-renderer.mjs';
+} from './telegram-renderer.mjs';
 
 const renderer = new TelegramRenderer();
 

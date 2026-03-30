@@ -1,14 +1,14 @@
 import crypto from 'node:crypto';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
-import { COMMAND_SPECS } from './commands.mjs';
+import { COMMAND_SPECS } from '../../commands/specs.mjs';
 import {
   buildPermissionPromptText,
   createTelegramPermissionRegistry,
   permissionOptionLabel,
-} from './telegram-permission-prompt.mjs';
-import { createTelegramChannelPublisher } from './telegram-channel-publisher.mjs';
-import { buildRuntimeControlKeyboard } from './telegram-controls.mjs';
-import { buildCommandPanelKeyboard } from './telegram-command-panels.mjs';
+} from './permission-prompt.mjs';
+import { createTelegramChannelPublisher } from './channel-publisher.mjs';
+import { buildRuntimeControlKeyboard } from './controls.mjs';
+import { buildCommandPanelKeyboard } from './command-panels.mjs';
 import {
   buildPreviewSummaryMarkdown,
   buildStructuredPreview,
@@ -16,7 +16,7 @@ import {
   truncateText,
   coerceTelegramHtml,
   renderTelegramPayload,
-} from './render.telegram.mjs';
+} from '../../render/telegram.mjs';
 
 const TELEGRAM_EDIT_RETRY_DELAY_MS = 800;
 const TELEGRAM_PROGRESS_EDIT_INTERVAL_MS = 2000;

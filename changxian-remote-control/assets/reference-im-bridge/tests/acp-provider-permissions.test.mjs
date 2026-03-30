@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { autoApprovePermissionRequest, formatToolOutput } from '../src/acp-provider.mjs';
+import { autoApprovePermissionRequest, formatToolOutput } from '../src/agent/base.mjs';
 
 test('autoApprovePermissionRequest allows trusted read access within workdir', () => {
   const decision = autoApprovePermissionRequest({

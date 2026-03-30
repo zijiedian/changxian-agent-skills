@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 
-import { buildStructuredPreview, splitShellArgs, truncateText } from './utils.mjs';
+import { buildStructuredPreview, splitShellArgs, truncateText } from '../utils/utils.mjs';
 
 const DEFAULT_DIAGNOSTICS = Object.freeze({
   backend: 'unknown',

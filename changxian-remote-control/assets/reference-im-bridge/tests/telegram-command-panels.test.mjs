@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { buildCommandPanelKeyboard } from '../src/telegram-command-panels.mjs';
+import { buildCommandPanelKeyboard } from '../src/adapters/telegram/command-panels.mjs';
 
 function callbackDataSet(keyboard) {
   return new Set(

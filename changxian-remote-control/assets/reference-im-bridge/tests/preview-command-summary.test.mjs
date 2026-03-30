@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildStructuredPreview } from '../src/utils.mjs';
+import { buildStructuredPreview } from '../src/utils/utils.mjs';
 
 test('buildStructuredPreview does not summarize command activity as 执行命令', () => {
   const preview = buildStructuredPreview('执行命令：git status', { status: 'Running', marker: 'exec' });

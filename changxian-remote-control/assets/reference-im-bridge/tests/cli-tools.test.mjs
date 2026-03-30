@@ -6,7 +6,7 @@ import {
   extractVersion,
   formatCliStatusLine,
   summarizeUpdateResult,
-} from '../src/cli-tools.mjs';
+} from '../src/utils/cli-tools.mjs';
 
 test('extractVersion parses common CLI version formats', () => {
   assert.equal(extractVersion('codex-cli 0.115.0'), '0.115.0');

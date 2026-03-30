@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildRuntimeControlKeyboard } from '../src/telegram-controls.mjs';
+import { buildRuntimeControlKeyboard } from '../src/adapters/telegram/controls.mjs';
 
 function callbackDataSet(keyboard) {
   return new Set(

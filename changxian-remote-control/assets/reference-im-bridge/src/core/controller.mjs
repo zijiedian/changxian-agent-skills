@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { resolveCommand, helpLines } from './commands.mjs';
-import { applyAssistantOps } from './assistant_ops.mjs';
+import { resolveCommand, helpLines } from '../commands/specs.mjs';
+import { applyAssistantOps } from '../commands/assistant-ops.mjs';
 import {
   BACKEND_CODEX,
   BACKEND_OPENCODE_ACP,
@@ -13,31 +13,31 @@ import {
   detectBackend,
   isAcpCommandPrefix,
   normalizeBackendAlias,
-} from './backend-detection.mjs';
-import { CodexAcpProvider } from './codex-acp-provider.mjs';
-import { ClaudeAgentAcpProvider } from './claude-agent-acp-provider.mjs';
-import { OpencodeAcpProvider } from './opencode-acp-provider.mjs';
-import { PiAcpProvider } from './pi-acp-provider.mjs';
-import { buildExecutionEnv, runCommandPreflight } from './preflight.mjs';
-import { parseChannelCommandInput } from './telegram-channel-publisher.mjs';
-import { buildStructuredPreview, extractStructuredPreview, redactedCommandText, truncateText } from './utils.mjs';
+} from '../utils/backend-detection.mjs';
+import { CodexAcpProvider } from '../agent/codex.mjs';
+import { ClaudeAgentAcpProvider } from '../agent/claude.mjs';
+import { OpencodeAcpProvider } from '../agent/opencode.mjs';
+import { PiAcpProvider } from '../agent/pi.mjs';
+import { buildExecutionEnv, runCommandPreflight } from '../utils/preflight.mjs';
+import { parseChannelCommandInput } from '../adapters/telegram/channel-publisher.mjs';
+import { buildStructuredPreview, extractStructuredPreview, redactedCommandText, truncateText } from '../utils/utils.mjs';
 import {
   buildClaudePermissionPrefix,
   buildCodexPermissionPrefix,
   buildRuntimeControlState,
   isClaudePermissionLevel,
   isCodexPermissionLevel,
-} from './runtime-controls.mjs';
-import { CliToolsManager, formatCliStatusLine, summarizeUpdateResult } from './cli-tools.mjs';
+} from '../utils/runtime-controls.mjs';
+import { CliToolsManager, formatCliStatusLine, summarizeUpdateResult } from '../utils/cli-tools.mjs';
 import {
   listSystemMcpServers,
   listSystemSkills,
   setSystemMcpEnabled,
   setSystemSkillEnabled,
-} from './resource-registry.mjs';
+} from '../utils/resource-registry.mjs';
 
 // 新渲染架构
-import { createRenderer, createMessageTransformer } from './render/index.mjs';
+import { createRenderer, createMessageTransformer } from '../render/index.mjs';
 
 const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[RECENT DIALOGUE]', '[CURRENT TASK]'];
 const PREFLIGHT_CACHE_TTL_MS = 5 * 60 * 1000;

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { AgentAcpProvider } from '../src/acp-provider.mjs';
+import { AgentAcpProvider } from '../src/agent/base.mjs';
 
 function createTestAgentScript() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-acp-agent-'));

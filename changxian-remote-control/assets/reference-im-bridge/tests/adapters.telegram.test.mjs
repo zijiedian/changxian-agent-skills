@@ -10,7 +10,7 @@ import {
   resolveTelegramChatId,
   startTelegramAdapter,
   shouldSendStandaloneFinalTelegramMessage,
-} from '../src/adapters.telegram.mjs';
+} from '../src/adapters/telegram/index.mjs';
 
 function createCtx() {
   const calls = [];

@@ -7,7 +7,7 @@ import {
   buildRuntimeControlState,
   detectClaudePermissionLevel,
   detectCodexPermissionLevel,
-} from '../src/runtime-controls.mjs';
+} from '../src/utils/runtime-controls.mjs';
 
 test('detectCodexPermissionLevel recognizes standard presets', () => {
   assert.equal(detectCodexPermissionLevel('codex -a on-request --search exec -s read-only --skip-git-repo-check'), 'readonly');

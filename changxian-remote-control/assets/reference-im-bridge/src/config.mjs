@@ -2,8 +2,8 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import dotenv from 'dotenv';
-import { BACKEND_CODEX, defaultCommandPrefixForBackend, normalizeBackendAlias } from './backend-detection.mjs';
-import { normalizeTelegramChannelAllowlist, parseTelegramChannelTargets } from './telegram-channel-publisher.mjs';
+import { BACKEND_CODEX, defaultCommandPrefixForBackend, normalizeBackendAlias } from './utils/backend-detection.mjs';
+import { normalizeTelegramChannelAllowlist, parseTelegramChannelTargets } from './adapters/telegram/channel-publisher.mjs';
 
 function firstEnv(...names) {
   for (const name of names) {

@@ -32,7 +32,7 @@ test('resource registry lists and toggles system skills and mcp servers', async 
   process.env.CODEX_HOME = tempHome;
 
   try {
-    const registry = await import(`../src/resource-registry.mjs?test=${Date.now()}`);
+    const registry = await import(`../src/utils/resource-registry.mjs?test=${Date.now()}`);
     const skills = registry.listSystemSkills();
     assert.equal(skills.length, 1);
     assert.equal(skills[0].name, 'alpha-skill');

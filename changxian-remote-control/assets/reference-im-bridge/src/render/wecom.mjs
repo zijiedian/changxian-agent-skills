@@ -1,4 +1,4 @@
-import { WeComRenderer } from './render/wecom-renderer.mjs';
+import { WeComRenderer } from './wecom-renderer.mjs';
 
 const renderer = new WeComRenderer();
 

@@ -1,5 +1,5 @@
 import { InlineKeyboard } from 'grammy';
-import { listSystemMcpServers, listSystemSkills } from './resource-registry.mjs';
+import { listSystemMcpServers, listSystemSkills } from '../../utils/resource-registry.mjs';
 
 function clipLabel(text, limit = 18) {
   const value = String(text || '').trim();

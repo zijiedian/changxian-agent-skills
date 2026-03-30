@@ -6,7 +6,7 @@ import {
   normalizeTelegramChannelAllowlist,
   createTelegramChannelPublisher,
   parseChannelCommandInput,
-} from '../src/telegram-channel-publisher.mjs';
+} from '../src/adapters/telegram/channel-publisher.mjs';
 
 test('parseTelegramChannelTargets parses alias map from JSON', () => {
   const result = parseTelegramChannelTargets('{"daily":"@daily","news":"-10042"}');

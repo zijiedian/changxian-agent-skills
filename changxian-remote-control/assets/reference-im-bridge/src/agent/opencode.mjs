@@ -1,4 +1,4 @@
-import { AgentAcpProvider } from './acp-provider.mjs';
+import { AgentAcpProvider } from './base.mjs';
 
 export class OpencodeAcpProvider extends AgentAcpProvider {
   constructor(config, buildExecutionEnv) {

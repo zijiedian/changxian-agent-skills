@@ -21,7 +21,7 @@ function runWithEnv(script, env = {}) {
 
 test('ACP_DEBUG=1 enables sessionUpdate debug logging', async () => {
   const script = `
-import { triggerDebugLog } from './src/acp-provider.mjs';
+import { triggerDebugLog } from '../src/agent/base.mjs';
 triggerDebugLog('sessionUpdate', { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hello' } });
 `.trim();
 
@@ -35,7 +35,7 @@ triggerDebugLog('sessionUpdate', { sessionUpdate: 'agent_message_chunk', content
 
 test('ACP_DEBUG=1 enables permission request debug logging', async () => {
   const script = `
-import { triggerDebugLog } from './src/acp-provider.mjs';
+import { triggerDebugLog } from '../src/agent/base.mjs';
 triggerDebugLog('requestPermission', {
   toolCall: { kind: 'read', locations: [{ path: '/test/file.txt' }] },
   options: [{ optionId: 'test-opt', kind: 'allow_once' }]
@@ -52,7 +52,7 @@ triggerDebugLog('requestPermission', {
 
 test('isDebugMode returns true when ACP_DEBUG=1', async () => {
   const script = `
-import { isDebugMode } from './src/acp-provider.mjs';
+import { isDebugMode } from '../src/agent/base.mjs';
 console.error('[DEBUG-MODE]', isDebugMode());
 `.trim();
 
@@ -62,7 +62,7 @@ console.error('[DEBUG-MODE]', isDebugMode());
 });
 
 test('Without ACP_DEBUG, no debug logs are emitted', async () => {
-  const script = `import { triggerDebugLog, isDebugMode } from './src/acp-provider.mjs';
+  const script = `import { triggerDebugLog, isDebugMode } from '../src/agent/base.mjs';
 console.error('[DEBUG-MODE]', isDebugMode());
 triggerDebugLog('sessionUpdate', { test: true });`;
 
@@ -75,7 +75,7 @@ triggerDebugLog('sessionUpdate', { test: true });`;
 
 test('Debug output includes full JSON structure', async () => {
   const script = `
-import { triggerDebugLog } from './src/acp-provider.mjs';
+import { triggerDebugLog } from '../src/agent/base.mjs';
 triggerDebugLog('sessionUpdate', {
   sessionUpdate: 'tool_call',
   kind: 'read',

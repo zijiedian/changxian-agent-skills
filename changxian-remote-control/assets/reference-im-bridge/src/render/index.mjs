@@ -49,8 +49,8 @@ export function createMessageTransformer(tunnelService) {
 // ============================================================================
 
 // 重新导出旧模块的函数（用于平滑迁移）
-export { renderTelegramPayload, coerceTelegramHtml } from '../render.telegram.mjs';
-export { renderWeComPayload } from '../render.wecom.mjs';
+export { renderTelegramPayload, coerceTelegramHtml } from './telegram.mjs';
+export { renderWeComPayload } from './wecom.mjs';
 
 // ============================================================================
 // 常量导出

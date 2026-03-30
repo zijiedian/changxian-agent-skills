@@ -1,5 +1,5 @@
 import { InlineKeyboard } from 'grammy';
-import { BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_OPENCODE_ACP, BACKEND_PI } from './backend-detection.mjs';
+import { BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_OPENCODE_ACP, BACKEND_PI } from '../../utils/backend-detection.mjs';
 
 function selectedButtonLabel(label, selected) {
   return selected ? `● ${label}` : label;

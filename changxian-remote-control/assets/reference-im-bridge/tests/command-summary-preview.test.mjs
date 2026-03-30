@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildStructuredPreview, buildExecProgressMarkdown } from '../src/utils.mjs';
+import { buildStructuredPreview, buildExecProgressMarkdown } from '../src/utils/utils.mjs';
 
 test('command-only previews do not emit 执行命令 style summaries', () => {
   const preview = buildStructuredPreview('```bash\ngit status\n```', { status: 'Running', marker: 'exec' });

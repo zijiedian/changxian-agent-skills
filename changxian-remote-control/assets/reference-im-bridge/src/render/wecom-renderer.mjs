@@ -12,7 +12,7 @@ import {
   buildStructuredPreview,
   sanitizePreview,
   splitMarkdownPages,
-} from '../utils.mjs';
+} from '../utils/utils.mjs';
 
 const WECOM_MESSAGE_LIMIT = 3600;
 const WECOM_FINAL_PAGE_LIMIT = 3200;

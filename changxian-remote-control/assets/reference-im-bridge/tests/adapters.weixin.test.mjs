@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { startWeixinAdapter } from '../src/adapters.weixin.mjs';
+import { startWeixinAdapter } from '../src/adapters/weixin.mjs';
 
 test('startWeixinAdapter bridges inbound chat into runtime controller and returns final text', async () => {
   let capturedAgent = null;

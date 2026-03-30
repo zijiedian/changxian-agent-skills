@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { eventFromSessionUpdate } from '../src/acp-provider.mjs';
+import { eventFromSessionUpdate } from '../src/agent/base.mjs';
 import { createMessageTransformer, createRenderer } from '../src/render/index.mjs';
-import { renderTelegramPayload } from '../src/render.telegram.mjs';
-import { renderWeComPayload } from '../src/render.wecom.mjs';
+import { renderTelegramPayload } from '../src/render/telegram.mjs';
+import { renderWeComPayload } from '../src/render/wecom.mjs';
 
 test('eventFromSessionUpdate converts tool_call updates into normalized agent events', () => {
   const event = eventFromSessionUpdate({

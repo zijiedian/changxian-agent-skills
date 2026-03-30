@@ -14,7 +14,7 @@ import {
   buildStructuredPreview,
   sanitizePreview,
   splitMarkdownPages,
-} from '../utils.mjs';
+} from '../utils/utils.mjs';
 
 const TELEGRAM_MESSAGE_LIMIT = 3900;
 const TELEGRAM_FINAL_PAGE_LIMIT = 1400;
