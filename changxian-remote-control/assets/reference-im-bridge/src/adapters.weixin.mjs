@@ -69,7 +69,7 @@ export async function startWeixinAdapter(config, controller, sdkOverride = null)
         },
       });
 
-      return { text: finalResponse || '已处理完成。' };
+      return { text: finalResponse || '已处理。' };
     },
   };
 

@@ -20,7 +20,7 @@ import { OpencodeAcpProvider } from './opencode-acp-provider.mjs';
 import { PiAcpProvider } from './pi-acp-provider.mjs';
 import { buildExecutionEnv, runCommandPreflight } from './preflight.mjs';
 import { parseChannelCommandInput } from './telegram-channel-publisher.mjs';
-import { extractStructuredPreview, redactedCommandText, truncateText } from './utils.mjs';
+import { buildStructuredPreview, extractStructuredPreview, redactedCommandText, truncateText } from './utils.mjs';
 import {
   buildClaudePermissionPrefix,
   buildCodexPermissionPrefix,
@@ -36,8 +36,13 @@ import {
   setSystemSkillEnabled,
 } from './resource-registry.mjs';
 
+// 新渲染架构
+import { createRenderer, createMessageTransformer } from './render/index.mjs';
+
 const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONTEXT]', '[RECENT DIALOGUE]', '[CURRENT TASK]'];
 const PREFLIGHT_CACHE_TTL_MS = 5 * 60 * 1000;
+const TASK_STALE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes stale task cleanup
+const TASK_CLEANUP_INTERVAL_MS = 60 * 1000; // cleanup every 60 seconds
 
 function balanceMarkdownFences(text) {
   const value = String(text || '').trimEnd();
@@ -122,28 +127,186 @@ function paginateItems(items = [], page = 0, pageSize = 4) {
   return { items: slice, page: currentPage, pageSize: size, total, totalPages };
 }
 
+function decodeHtmlEntities(text) {
+  return String(text || '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, '\'')
+    .replace(/&amp;/g, '&');
+}
+
+function plainTextFromRenderedMessage(rendered) {
+  const body = String(rendered?.body || '').trim();
+  if (!body) return '';
+  if (String(rendered?.format || '').trim().toLowerCase() !== 'html') return body;
+  return decodeHtmlEntities(
+    body
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(?:p|div|pre|li|blockquote|h[1-6])>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+  )
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function progressMarkerForOutgoing(outgoing) {
+  switch (String(outgoing?.type || '').trim().toLowerCase()) {
+    case 'tool_call':
+    case 'tool_update':
+      return 'exec';
+    case 'thought':
+    case 'plan':
+    case 'mode_change':
+    case 'config_update':
+    case 'model_update':
+    case 'system_message':
+      return 'thinking';
+    case 'text':
+    case 'user_replay':
+    case 'resource':
+    case 'resource_link':
+      return 'assistant';
+    default:
+      return 'thinking';
+  }
+}
+
+function progressTextForRenderedEvent(event, outgoing, rendered) {
+  const renderedText = plainTextFromRenderedMessage(rendered);
+  const metadata = outgoing?.metadata || {};
+  switch (String(outgoing?.type || '').trim().toLowerCase()) {
+    case 'tool_call':
+    case 'tool_update':
+      return String(metadata.displaySummary || event?.content || renderedText || outgoing?.text || '').trim();
+    case 'thought':
+    case 'text':
+    case 'user_replay':
+      return String(event?.content || renderedText || outgoing?.text || '').trim();
+    case 'mode_change':
+    case 'config_update':
+    case 'model_update':
+    case 'system_message':
+    case 'plan':
+    case 'resource':
+    case 'resource_link':
+      return String(renderedText || outgoing?.text || event?.message || '').trim();
+    default:
+      return String(renderedText || outgoing?.text || '').trim();
+  }
+}
+
+function isPiSkillInventoryEvent(event, backend) {
+  if (backend !== BACKEND_PI) return false;
+  if (String(event?.type || '').trim().toLowerCase() !== 'text') return false;
+  const content = String(event?.content || '').trim();
+  if (!content.startsWith('## Skills')) return false;
+  if (!/\/(?:\.pi\/agent|\.agents)\/skills\//.test(content)) return false;
+  const skillPathMatches = content.match(/\/SKILL\.md\b/g) || [];
+  return skillPathMatches.length >= 2;
+}
+
+function shouldSuppressProgressEvent(event, { backend = '' } = {}) {
+  const type = String(event?.type || '').trim().toLowerCase();
+  return type === 'session_info_update' || isPiSkillInventoryEvent(event, backend);
+}
+
 export class RuntimeController {
   constructor(config, store) {
     this.config = config;
     this.store = store;
     this.tasks = new Map();
+    this.taskQueues = new Map();
     this.authSessions = new Map();
     this.scheduler = null;
     this.preflightCache = new Map();
+    this.staleTaskCleanupTimer = null;
+    
+    // ACP Providers
     this.codexAcp = new CodexAcpProvider(config, buildExecutionEnv);
     this.claudeAcp = new ClaudeAgentAcpProvider(config, buildExecutionEnv);
     this.opencodeAcp = new OpencodeAcpProvider(config, buildExecutionEnv);
     this.piAcp = new PiAcpProvider(config, buildExecutionEnv);
+    
+    // CLI Tools
     this.cliTools = new CliToolsManager(() => this.executionEnv());
+    
+    // 新渲染架构
+    this.renderers = {
+      telegram: createRenderer('telegram'),
+      wecom: createRenderer('wecom'),
+      base: createRenderer('base'),
+    };
+    this.messageTransformer = createMessageTransformer();
+    
+    // Channel Publisher
     this.telegramChannelPublisher = null;
+    this.startStaleTaskCleanup();
   }
 
   attachScheduler(scheduler) {
     this.scheduler = scheduler || null;
   }
 
+  startStaleTaskCleanup() {
+    if (this.staleTaskCleanupTimer) return;
+    this.staleTaskCleanupTimer = setInterval(() => this.cleanupStaleTasks(), TASK_CLEANUP_INTERVAL_MS);
+    this.staleTaskCleanupTimer.unref?.();
+  }
+
+  stopStaleTaskCleanup() {
+    if (this.staleTaskCleanupTimer) {
+      clearInterval(this.staleTaskCleanupTimer);
+      this.staleTaskCleanupTimer = null;
+    }
+  }
+
+  cleanupStaleTasks() {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [taskKey, entry] of this.tasks.entries()) {
+      if (entry && now - entry.startedAt > TASK_STALE_TIMEOUT_MS) {
+        console.warn(`[controller] stale task cleanup host=${entry.host} chat=${entry.chatId} age=${Math.round((now - entry.startedAt) / 1000)}s`);
+        entry.cancel();
+        this.tasks.delete(taskKey);
+        cleaned++;
+      }
+    }
+    if (cleaned > 0) {
+      console.info(`[controller] cleaned ${cleaned} stale tasks, remaining=${this.tasks.size}`);
+    }
+  }
+
   attachTelegramChannelPublisher(publisher) {
     this.telegramChannelPublisher = publisher || null;
+  }
+
+  rendererForHost(host) {
+    const normalized = String(host || '').trim().toLowerCase();
+    if (normalized === 'telegram') return this.renderers.telegram;
+    if (normalized === 'wecom') return this.renderers.wecom;
+    return this.renderers.base;
+  }
+
+  buildRenderedProgressPayload(host, event, { elapsedSeconds = 0, workingDirectory = '' } = {}) {
+    const renderer = this.rendererForHost(host);
+    const outgoing = this.messageTransformer.transform(event, {
+      id: String(host || 'runtime'),
+      workingDirectory,
+    });
+    const rendered = renderer.render(outgoing, 'medium');
+    const marker = progressMarkerForOutgoing(outgoing);
+    const text = progressTextForRenderedEvent(event, outgoing, rendered) || 'thinking...';
+    return {
+      status: 'Running',
+      marker,
+      text,
+      preview: buildStructuredPreview(text, { status: 'Running', marker }),
+      elapsedSeconds,
+      event,
+      outgoing,
+      rendered,
+    };
   }
 
   makeTaskKey(host, chatId) {
@@ -159,13 +322,84 @@ export class RuntimeController {
     return [...this.tasks.values()].some((entry) => entry?.chatId === target);
   }
 
+  hasSchedulerTaskForChat(chatId) {
+    const target = String(chatId);
+    return [...this.tasks.values()].some((entry) => entry?.chatId === target && this.isSchedulerTaskHost(entry.host));
+  }
+
+  queuedTaskCount(chatId) {
+    return (this.taskQueues.get(String(chatId)) || []).length;
+  }
+
   hasConflictingRunningTaskForChat(chatId, taskHost) {
     const target = String(chatId);
-    const schedulerTask = this.isSchedulerTaskHost(taskHost);
-    return [...this.tasks.values()].some((entry) => {
-      if (!entry || entry.chatId !== target) return false;
-      if (!schedulerTask) return true;
-      return this.isSchedulerTaskHost(entry.host);
+    const currentIsScheduler = this.isSchedulerTaskHost(taskHost);
+    for (const entry of this.tasks.values()) {
+      if (entry?.chatId !== target) continue;
+      const existingIsScheduler = this.isSchedulerTaskHost(entry.host);
+      if (currentIsScheduler && !existingIsScheduler) continue;
+      return true;
+    }
+    return false;
+  }
+
+  shouldQueueConflictingTask(chatId, taskHost, options = {}) {
+    if (options.allowQueue === false) return false;
+    if (this.isSchedulerTaskHost(taskHost)) return false;
+    if (this.hasSchedulerTaskForChat(chatId)) return false;
+    return true;
+  }
+
+  queueNoticeText(chatId) {
+    const queued = this.queuedTaskCount(chatId);
+    if (queued > 0) return `当前会话忙碌中，已加入队列，前方还有 ${queued} 个排队任务。`;
+    return '当前会话忙碌中，已加入队列，等待当前任务完成。';
+  }
+
+  async enqueueTask(request, sink, options = {}) {
+    const chatId = String(request.chatId);
+    const queue = this.taskQueues.get(chatId) || [];
+    const notice = this.queueNoticeText(chatId);
+    try {
+      await sink.progress({
+        status: 'Queued',
+        marker: 'thinking',
+        text: notice,
+        preview: buildStructuredPreview(notice, { status: 'Queued', marker: 'thinking' }),
+        elapsedSeconds: 0,
+      });
+    } catch {
+      // ignore queue acknowledgement failures
+    }
+
+    return await new Promise((resolve, reject) => {
+      queue.push({
+        request,
+        sink,
+        options: { ...options, allowQueue: false },
+        resolve,
+        reject,
+      });
+      this.taskQueues.set(chatId, queue);
+    });
+  }
+
+  drainTaskQueue(chatId) {
+    const target = String(chatId);
+    if (this.hasRunningTaskForChat(target)) return;
+    const queue = this.taskQueues.get(target);
+    if (!queue?.length) return;
+
+    const next = queue.shift();
+    if (!queue.length) this.taskQueues.delete(target);
+
+    queueMicrotask(() => {
+      Promise.resolve()
+        .then(() => this.runTask(next.request, next.sink, next.options))
+        .then(next.resolve, next.reject)
+        .finally(() => {
+          if (!this.hasRunningTaskForChat(target)) this.drainTaskQueue(target);
+        });
     });
   }
 
@@ -710,6 +944,7 @@ export class RuntimeController {
       `telegram_default_channel: ${this.config.tgDefaultChannel || '(none)'}`,
       `command: ${this.displayCommandPrefix(chatId)}`,
       `running: ${this.hasRunningTaskForChat(chatId) ? 'yes' : 'no'}`,
+      `queued: ${this.queuedTaskCount(chatId)}`,
     ];
     if (includeCli) lines.push(...this.cliStatusLines());
     return lines;
@@ -1122,6 +1357,9 @@ export class RuntimeController {
     const taskHost = options.taskHost || request.host;
     const taskKey = this.makeTaskKey(taskHost, chatId);
     if (this.hasConflictingRunningTaskForChat(chatId, taskHost)) {
+      if (this.shouldQueueConflictingTask(chatId, taskHost, options)) {
+        return this.enqueueTask(request, sink, { ...options, hostName, taskHost });
+      }
       await sink.final('当前会话已有任务在运行，请稍后重试。');
       return { success: false, skipped: true, summary: 'chat busy', errorText: 'chat already has a running task' };
     }
@@ -1198,9 +1436,13 @@ export class RuntimeController {
         onPermissionRequest: typeof sink.requestPermission === 'function'
           ? (permissionRequest, meta = {}) => sink.requestPermission(permissionRequest, meta)
           : undefined,
-        onProgress: async (payload) => {
+        onEvent: async (event) => {
           if (suppressProgress) return;
-          const elapsedSeconds = (Date.now() - started) / 1000;
+          if (shouldSuppressProgressEvent(event, { backend })) return;
+          const payload = this.buildRenderedProgressPayload(request.host, event, {
+            elapsedSeconds: (Date.now() - started) / 1000,
+            workingDirectory: workdir,
+          });
           const previewBody = String(payload?.text || payload?.preview?.summary || payload?.preview?.content || '').trim() || 'thinking...';
           if (payload?.marker !== 'thinking' || previewBody.toLowerCase() !== 'thinking...') {
             leadingThinkingActive = false;
@@ -1211,7 +1453,7 @@ export class RuntimeController {
             marker: payload?.marker || 'thinking',
             text: previewBody,
             preview: payload?.preview,
-            elapsedSeconds,
+            elapsedSeconds: Number(payload?.elapsedSeconds) || 0,
           });
         },
       });
@@ -1254,7 +1496,7 @@ export class RuntimeController {
       const message = error?.message || String(error);
       if (abortController.signal.aborted) {
         await sink.final('任务已取消。');
-        throw error;
+        return { success: false, skipped: true, summary: 'cancelled', errorText: 'cancelled' };
       }
       await sink.final(clip(`Task failed\nReason: ${message}`));
       return { success: false, summary: message, errorText: message };
@@ -1262,6 +1504,7 @@ export class RuntimeController {
       leadingThinkingActive = false;
       if (thinkingTicker) clearInterval(thinkingTicker);
       this.tasks.delete(taskKey);
+      this.drainTaskQueue(chatId);
     }
   }
 

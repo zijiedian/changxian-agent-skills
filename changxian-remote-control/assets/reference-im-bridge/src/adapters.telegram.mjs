@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { COMMAND_SPECS } from './commands.mjs';
-import { coerceTelegramHtml, renderTelegramPayload } from './render.telegram.mjs';
 import {
   buildPermissionPromptText,
   createTelegramPermissionRegistry,
@@ -10,7 +9,14 @@ import {
 import { createTelegramChannelPublisher } from './telegram-channel-publisher.mjs';
 import { buildRuntimeControlKeyboard } from './telegram-controls.mjs';
 import { buildCommandPanelKeyboard } from './telegram-command-panels.mjs';
-import { buildPreviewSummaryMarkdown, buildStructuredPreview, previewHasProgressDetails, truncateText } from './utils.mjs';
+import {
+  buildPreviewSummaryMarkdown,
+  buildStructuredPreview,
+  previewHasProgressDetails,
+  truncateText,
+  coerceTelegramHtml,
+  renderTelegramPayload,
+} from './render.telegram.mjs';
 
 const TELEGRAM_EDIT_RETRY_DELAY_MS = 800;
 const TELEGRAM_PROGRESS_EDIT_INTERVAL_MS = 2000;
@@ -20,6 +26,7 @@ const TELEGRAM_COMMAND_SYNC_TTL_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_COMMAND_SYNC_RETRY_MS = 60 * 1000;
 const TELEGRAM_MAX_DRAFT_ID = 2147483646;
 const TELEGRAM_DRAFT_ASSISTANT_FLUSH_CHARS = 48;
+const TELEGRAM_DRAFT_CLEAR_TEXT = '\u2060';
 
 function telegramErrorText(error) {
   return error?.description || error?.error?.description || error?.message || error?.error?.message || String(error);
@@ -210,15 +217,89 @@ function progressHeading(preview) {
   return '';
 }
 
+function normalizeToolLifecycleSummary(text) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const match = /^(.*?)\s+·\s+(pending|in_progress|completed|failed)(?:\s+(.*))?$/i.exec(value);
+  if (!match) return value;
+
+  const title = String(match[1] || '').trim();
+  const status = String(match[2] || '').trim().toLowerCase();
+  let detail = String(match[3] || '').trim();
+  if (detail.toLowerCase() === title.toLowerCase()) detail = '';
+  if (detail.toLowerCase().startsWith(`${title.toLowerCase()} `)) {
+    detail = detail.slice(title.length).trim();
+  }
+
+  const genericTool = /^(?:tool|工具)$/i.test(title);
+  if (genericTool) {
+    if (status === 'pending') return detail ? `工具准备中 · ${detail}` : '工具准备中';
+    if (status === 'in_progress') return detail ? `工具执行中 · ${detail}` : '工具执行中';
+    if (status === 'completed') return detail ? `工具执行完成 · ${detail}` : '工具执行完成';
+    if (status === 'failed') return detail ? `工具执行失败 · ${detail}` : '工具执行失败';
+    return value;
+  }
+
+  if (status === 'pending') return detail ? `准备执行: ${title} · ${detail}` : `准备执行: ${title}`;
+  if (status === 'in_progress') return detail ? `执行中: ${title} · ${detail}` : `执行中: ${title}`;
+  if (status === 'completed') return detail ? `执行完成: ${title} · ${detail}` : `执行完成: ${title}`;
+  if (status === 'failed') return detail ? `执行失败: ${title} · ${detail}` : `执行失败: ${title}`;
+  return value;
+}
+
+function localizeTelegramProgressText(text) {
+  return normalizeToolLifecycleSummary(text);
+}
+
+function localizeExecDraftText(text) {
+  const lines = String(text || '')
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return '';
+      if (trimmed === 'Running' || trimmed === 'in_progress') return '执行中';
+      if (trimmed === 'Done' || trimmed === 'completed') return '已完成';
+      if (trimmed === 'Failed' || trimmed === 'failed') return '失败';
+      if (trimmed === 'pending') return '准备中';
+      return localizeTelegramProgressText(trimmed);
+    })
+    .filter(Boolean);
+  return lines.join('\n').trim();
+}
+
+function shouldUseExecPreviewContent(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  if (value.includes('\n')) return true;
+  if (/^\s*```/.test(value)) return true;
+  if (/^\s*[\[{]/.test(value)) return true;
+  if (/ · (?:pending|in_progress|completed|failed)\b/i.test(value)) return true;
+  return false;
+}
+
+function truncateExecDraftText(text, limit = 1600) {
+  const value = String(text || '').trim();
+  if (value.length <= limit) return value;
+  return `${value.slice(0, Math.max(0, limit - 3)).trimEnd()}...`;
+}
+
+function buildExecDraftText(entry, payload) {
+  const previewContent = String(payload?.preview?.content || '').trim();
+  const fallbackContent = draftLineFromEntry(entry, payload) || String(payload?.text || entry?.summary || '').trim();
+  const content = shouldUseExecPreviewContent(previewContent) ? previewContent : fallbackContent;
+  const localized = localizeExecDraftText(content || '执行中');
+  return truncateExecDraftText(localized || '执行中', 1600);
+}
+
 function fallbackProgressSummary(preview, previewText, marker = '') {
-  const summary = String(preview?.summary || '').trim();
+  const summary = localizeTelegramProgressText(String(preview?.summary || '').trim());
   if (summary) return summary;
 
   const commandPreviewLines = Array.isArray(preview?.commandPreviewLines) ? preview.commandPreviewLines : [];
   const commandPreview = String(preview?.commandPreview || commandPreviewLines[commandPreviewLines.length - 1] || '').trim();
   if (commandPreview) return truncateText(commandPreview, 120);
 
-  const inlineText = truncateText(String(previewText || '').trim(), 120);
+  const inlineText = truncateText(localizeTelegramProgressText(String(previewText || '').trim()), 120);
   if (inlineText) return inlineText;
 
   if (preview?.phase === 'thinking') return '思考中';
@@ -231,7 +312,10 @@ function fallbackProgressSummary(preview, previewText, marker = '') {
 function buildLatestProgressMarkdown(preview, previewText, marker = '') {
   const heading = progressHeading(preview);
   const summary = fallbackProgressSummary(preview, previewText, marker);
-  const markdown = buildPreviewSummaryMarkdown(preview, {
+  const markdown = buildPreviewSummaryMarkdown({
+    ...preview,
+    summary: localizeTelegramProgressText(preview?.summary || ''),
+  }, {
     heading,
     maxHighlights: 1,
     maxChecks: 0,
@@ -250,13 +334,21 @@ function buildLatestProgressMarkdown(preview, previewText, marker = '') {
 
 
 function draftLineFromEntry(entry, payload) {
-  const summary = String(entry?.summary || payload?.text || '').trim();
+  const summary = localizeTelegramProgressText(String(entry?.summary || payload?.text || '').trim());
   const checks = Array.isArray(payload?.preview?.checks) ? payload.preview.checks : Array.isArray(entry?.preview?.checks) ? entry.preview.checks : [];
   const firstCheck = String(checks[0] || '').trim();
   if (summary && firstCheck && !summary.includes(firstCheck)) return `${summary} · ${firstCheck}`;
   if (summary) return summary;
   if (firstCheck) return firstCheck;
   return '';
+}
+
+function renderedHtmlFromProgressPayload(payload) {
+  const body = String(payload?.rendered?.body || '').trim();
+  if (!body) return '';
+  return String(payload?.rendered?.format || '').trim().toLowerCase() === 'html'
+    ? body
+    : coerceTelegramHtml(body);
 }
 
 function buildTelegramProgressEntry(payload) {
@@ -266,25 +358,37 @@ function buildTelegramProgressEntry(payload) {
     : buildStructuredPreview(String(payload?.text || ''), { status: 'Running', marker });
   const previewText = String(payload?.text || preview.summary || preview.content || '').trim();
   const previewLower = previewText.toLowerCase();
+  const renderedHtml = renderedHtmlFromProgressPayload(payload);
+  const renderedSummary = renderedHtml ? draftTextFromMarkdown(renderedHtml) : '';
   const isPlaceholder = marker === 'thinking'
     && (!previewHasProgressDetails(preview))
     && (!previewText || previewLower === 'thinking...' || previewLower === 'thinking');
 
   if (isPlaceholder) {
-    const rendered = renderTelegramPayload({
-      status: 'Running',
-      marker,
-      text: previewText || 'thinking...',
-      preview,
-      elapsedSeconds: Number(payload?.elapsedSeconds) || 0,
-    });
     return {
       kind: 'placeholder',
-      html: rendered.html,
+      html: renderedHtml || renderTelegramPayload({
+        status: 'Running',
+        marker,
+        text: previewText || 'thinking...',
+        preview,
+        elapsedSeconds: Number(payload?.elapsedSeconds) || 0,
+      }).html,
       marker,
       phase: String(preview?.phase || marker).trim().toLowerCase(),
-      summary: 'thinking...',
-      markdown: '',
+      summary: renderedSummary || 'thinking...',
+      markdown: renderedSummary,
+    };
+  }
+
+  if (renderedHtml) {
+    return {
+      kind: 'entry',
+      html: renderedHtml,
+      marker,
+      phase: String(preview?.phase || marker).trim().toLowerCase(),
+      summary: renderedSummary || fallbackProgressSummary(preview, previewText, marker),
+      markdown: renderedSummary,
     };
   }
 
@@ -1058,13 +1162,13 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
     }
   }
 
-  async function finalizeDraftIndicator(text = '已完成') {
+  async function finalizeDraftIndicator(text = TELEGRAM_DRAFT_CLEAR_TEXT) {
     if (!draftStreamingEnabled) return;
     try {
       await ctx.api.sendMessageDraft(
         ctx.chat.id,
         progressDraftId,
-        String(text || '已完成').trim() || '已完成',
+        String(text || TELEGRAM_DRAFT_CLEAR_TEXT) || TELEGRAM_DRAFT_CLEAR_TEXT,
         messageThreadId ? { message_thread_id: messageThreadId } : undefined,
       );
     } catch {
@@ -1099,7 +1203,9 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
         progressDraftText = '';
       } else {
         assistantDraftText = '';
-        progressDraftText = draftLineFromEntry(entry, payload);
+        progressDraftText = entry.marker === 'exec' || entry.phase === 'exec'
+          ? buildExecDraftText(entry, payload)
+          : draftLineFromEntry(entry, payload);
       }
       latestProgressEntry = entry;
       placeholderDraftText = '';
@@ -1125,7 +1231,7 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
       if (draftStreamingEnabled) progressUpdateCount += 1;
     },
     async final(payload, options = {}) {
-      await finalizeDraftIndicator('已完成');
+      await finalizeDraftIndicator();
       const rendered = renderTelegramPayload(payload);
       const pages = rendered.pages || [rendered.html];
       const token = rememberPagination(String(ctx.chat.id), pages, {
@@ -1344,10 +1450,10 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
     }
   }
 
-  async function finalizeDraftIndicator(text = '已完成') {
+  async function finalizeDraftIndicator(text = TELEGRAM_DRAFT_CLEAR_TEXT) {
     if (!draftStreamingEnabled || !chatId) return;
     try {
-      await bot.api.sendMessageDraft(chatId, progressDraftId, String(text || '已完成').trim() || '已完成');
+      await bot.api.sendMessageDraft(chatId, progressDraftId, String(text || TELEGRAM_DRAFT_CLEAR_TEXT) || TELEGRAM_DRAFT_CLEAR_TEXT);
     } catch {
       // ignore final draft cleanup failures
     }
@@ -1361,14 +1467,13 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
 
   return {
     async progress(payload) {
-      const rendered = renderTelegramPayload(payload);
-      const pages = rendered.pages || [rendered.html];
-      progressDraftText = mergeDraftHtml(progressDraftText, draftTextFromMarkdown(pages[0] || rendered.html));
+      const entry = buildTelegramProgressEntry(payload);
+      progressDraftText = mergeDraftHtml(progressDraftText, draftTextFromMarkdown(entry.html));
       await upsertProgress(progressDraftText);
       if (draftStreamingEnabled) progressUpdateCount += 1;
     },
     async final(payload) {
-      await finalizeDraftIndicator('已完成');
+      await finalizeDraftIndicator();
       const rendered = renderTelegramPayload(payload);
       const pages = rendered.pages || [rendered.html];
       const token = rememberPagination(chatId, pages);

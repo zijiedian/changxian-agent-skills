@@ -209,10 +209,6 @@ export function setSystemSkillEnabled(identifier, enabled) {
   };
 }
 
-export function enabledSkillPaths() {
-  return listSystemSkills().filter((skill) => skill.enabled).map((skill) => skill.path);
-}
-
 export function listSystemMcpServers() {
   const jsonPath = mcpPath();
   if (fs.existsSync(jsonPath)) {

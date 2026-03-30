@@ -42,6 +42,14 @@ function execCapture(command, args, env, timeout = DEFAULT_TIMEOUT_MS) {
   };
 }
 
+function npmViewVersion(packageName, env) {
+  const result = execCapture('npm', ['view', packageName, 'version'], env, DEFAULT_TIMEOUT_MS);
+  if (result.ok) {
+    return extractVersion(result.stdout || result.stderr);
+  }
+  return '';
+}
+
 function commandPath(binary, env) {
   const result = shellCapture(`command -v ${binary}`, env);
   return result.ok ? firstLine(result.stdout) : '';
@@ -104,8 +112,21 @@ function detectPiSource(path, resolvedPath) {
 function codexStatus(env, checkLatest = false) {
   const path = commandPath('codex-acp', env);
   const resolvedPath = path ? safeRealpath(path) : '';
-  const versionOutput = path ? execCapture(path, ['--help'], env) : { ok: false, stdout: '', stderr: '' };
-  const installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
+  let installedVersion = '';
+  
+  // Try --version first, then --help, then npm view as fallback
+  if (path) {
+    let versionOutput = execCapture(path, ['--version'], env);
+    if (!versionOutput.ok || !versionOutput.stdout.trim()) {
+      versionOutput = execCapture(path, ['--help'], env);
+    }
+    installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
+    
+    // Fallback: get version from npm
+    if (!installedVersion) {
+      installedVersion = npmViewVersion('@zed-industries/codex-acp', env);
+    }
+  }
   let latestVersion = '';
   let updateAvailable = null;
 
@@ -135,8 +156,21 @@ function codexStatus(env, checkLatest = false) {
 function claudeStatus(env, checkLatest = false) {
   const path = commandPath('claude-agent-acp', env);
   const resolvedPath = path ? safeRealpath(path) : '';
-  const versionOutput = path ? execCapture(path, ['--help'], env) : { ok: false, stdout: '', stderr: '' };
-  const installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
+  let installedVersion = '';
+  
+  // Try --version first, then --help, then npm view as fallback
+  if (path) {
+    let versionOutput = execCapture(path, ['--version'], env);
+    if (!versionOutput.ok || !versionOutput.stdout.trim()) {
+      versionOutput = execCapture(path, ['--help'], env);
+    }
+    installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
+    
+    // Fallback: get version from npm
+    if (!installedVersion) {
+      installedVersion = npmViewVersion('@zed-industries/claude-agent-acp', env);
+    }
+  }
   let latestVersion = '';
   let updateAvailable = null;
 
@@ -198,8 +232,21 @@ function opencodeStatus(env, checkLatest = false) {
 function piStatus(env, checkLatest = false) {
   const path = commandPath('pi-acp', env);
   const resolvedPath = path ? safeRealpath(path) : '';
-  const versionOutput = path ? execCapture(path, ['--help'], env) : { ok: false, stdout: '', stderr: '' };
-  const installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
+  let installedVersion = '';
+  
+  // Try --version first, then --help, then npm view as fallback
+  if (path) {
+    let versionOutput = execCapture(path, ['--version'], env);
+    if (!versionOutput.ok || !versionOutput.stdout.trim()) {
+      versionOutput = execCapture(path, ['--help'], env);
+    }
+    installedVersion = extractVersion(versionOutput.stdout || versionOutput.stderr);
+    
+    // Fallback: get version from npm
+    if (!installedVersion) {
+      installedVersion = npmViewVersion('pi-acp', env);
+    }
+  }
   let latestVersion = '';
   let updateAvailable = null;
 

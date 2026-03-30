@@ -25,6 +25,8 @@ test('running wecom payload stays concise and keeps tool/check info', () => {
   assert.match(rendered.content, /命令执行完成/);
   assert.doesNotMatch(rendered.content, /\*\*/);
   assert.doesNotMatch(rendered.content, /变更节选/);
+  assert.doesNotMatch(rendered.content, /\b00:12\b/);
+  assert.doesNotMatch(rendered.content, /用时/);
 });
 
 test('final wecom payload prefers concise summary over verbose sections', () => {
@@ -49,4 +51,26 @@ test('final wecom payload prefers concise summary over verbose sections', () => 
   assert.match(rendered.content, /数据库读取成功/);
   assert.doesNotMatch(rendered.content, /变更节选/);
   assert.doesNotMatch(rendered.content, /还有 .*条摘要/);
+});
+
+test('wecom payload preserves direct string finals instead of falling back to placeholder', () => {
+  const rendered = renderWeComPayload('Authentication successful\nValid for 12h');
+
+  assert.match(rendered.content, /Authentication successful/);
+  assert.match(rendered.content, /Valid for 12h/);
+  assert.doesNotMatch(rendered.content, /暂无输出/);
+});
+
+test('wecom thinking payload matches telegram wording and omits elapsed time', () => {
+  const rendered = renderWeComPayload({
+    status: 'Running',
+    marker: 'thinking',
+    text: 'thinking...',
+    elapsedSeconds: 7,
+  });
+
+  assert.match(rendered.content, /^[\-\\|/] Thinking$/);
+  assert.doesNotMatch(rendered.content, /用时/);
+  assert.doesNotMatch(rendered.content, /\b00:07\b/);
+  assert.doesNotMatch(rendered.content, /Thinking\.\.\./);
 });

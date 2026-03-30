@@ -88,10 +88,6 @@ export function preferredAcpCommandPrefix(config = {}, backend = BACKEND_CODEX) 
   return '';
 }
 
-export function normalizePreferredCommandPrefix(commandPrefix = '', config = {}) {
-  return String(commandPrefix || '').trim();
-}
-
 export function normalizeBackendAlias(value, fallback = BACKEND_UNSUPPORTED) {
   const normalized = String(value || '').trim().toLowerCase();
   if (!normalized) return fallback;

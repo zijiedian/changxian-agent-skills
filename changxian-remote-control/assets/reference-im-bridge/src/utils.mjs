@@ -2,8 +2,9 @@ const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const CONFIG_CONTEXT_NOISE_RE = /^(?:workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|reasoning summaries:|session id:|mcp startup:)/i;
 const SENSITIVE_OPTION_RE = /(token|secret|passphrase|password|authorization|auth|api[-_]?key|cookie|session|bearer)/i;
 const LONG_SECRET_RE = /^[A-Za-z0-9_\-]{24,}$/;
-const TRACE_MARKERS = new Set(['assistant', 'codex', 'thinking', 'exec', 'user']);
+const TRACE_MARKERS = new Set(['assistant', 'codex', 'thinking', 'reasoning', 'exec', 'user', 'final_answer', 'text']);
 const TRACE_SKIP_SECTION_MARKERS = new Set(['user']);
+const INLINE_TRACE_MARKERS = ['assistant', 'codex', 'thinking', 'reasoning', 'final_answer'];
 const INTERNAL_RUNTIME_NOISE_PATTERNS = [
   /apply_patch was requested via exec_command/i,
   /use the apply_patch tool instead of exec_command/i,
@@ -48,6 +49,53 @@ function isInternalRuntimeNoiseLine(line) {
   return INTERNAL_RUNTIME_NOISE_PATTERNS.some((pattern) => pattern.test(stripped));
 }
 
+function isLeakedSkillInventoryHeading(line) {
+  return /^(?:#{1,6}\s*)?skills\s*:?\s*$/i.test(String(line || '').trim());
+}
+
+function isLeakedSkillInventoryEntry(line) {
+  const stripped = String(line || '').trim();
+  if (!stripped || !/SKILL\.md\b/i.test(stripped)) return false;
+  return /^[-*+]\s+/.test(stripped)
+    || stripped.startsWith('/')
+    || /^\[[^\]]+\]\((?:\/|file:)/i.test(stripped);
+}
+
+function stripLeakedSkillInventory(text) {
+  const lines = String(text || '').split('\n');
+  const output = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!isLeakedSkillInventoryHeading(line)) {
+      output.push(line);
+      continue;
+    }
+
+    let cursor = index + 1;
+    while (cursor < lines.length && !lines[cursor].trim()) cursor += 1;
+
+    let entryCount = 0;
+    while (cursor < lines.length && isLeakedSkillInventoryEntry(lines[cursor])) {
+      entryCount += 1;
+      cursor += 1;
+    }
+
+    if (!entryCount) {
+      output.push(line);
+      continue;
+    }
+
+    while (cursor < lines.length && !lines[cursor].trim()) cursor += 1;
+    index = cursor - 1;
+  }
+
+  return output.join('\n')
+    .replace(/^(?:#{1,6}\s*)?skills\b[^\n]*SKILL\.md[^\n]*$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function cleanOutput(output) {
   const text = String(output || '')
     .replace(ANSI_ESCAPE_RE, '')
@@ -64,7 +112,7 @@ export function cleanOutput(output) {
     compact.push(line);
     previous = line;
   }
-  return compact.join('\n').trim();
+  return stripLeakedSkillInventory(compact.join('\n'));
 }
 
 function normalizeTraceMarker(line) {
@@ -129,6 +177,20 @@ function parseTraceSections(lines) {
     sections.push({ marker: currentMarker, content: currentLines.join('\n').trim() });
   }
   return sections;
+}
+
+function normalizeInlineTraceSections(text) {
+  const normalized = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+  const markerPattern = INLINE_TRACE_MARKERS.join('|');
+  const inlineMarkerRe = new RegExp(`(^|\\n|[。！？.!?]\\s*)(${markerPattern})([:：]?\\s*)(?=\\S)`, 'gmi');
+  return normalized.replace(inlineMarkerRe, (_match, prefix, marker) => {
+    const boundary = prefix === '' || prefix === '\n'
+      ? prefix
+      : `${String(prefix).trimEnd()}\n`;
+    return `${boundary}${marker}\n`;
+  });
 }
 
 function latestSection(sections, markers) {
@@ -560,6 +622,7 @@ function buildRunningPreviewFromSections(sections) {
 
 export function extractPreview(output, status = 'Done') {
   const cleaned = cleanOutput(output);
+  const normalizedSectionsInput = normalizeInlineTraceSections(cleaned);
   if (!cleaned) {
     return {
       marker: status === 'Running' ? 'thinking' : 'assistant',
@@ -567,16 +630,20 @@ export function extractPreview(output, status = 'Done') {
     };
   }
 
-  const sections = parseTraceSections(cleaned.split('\n'));
+  const sections = parseTraceSections(normalizedSectionsInput.split('\n'));
   if (status === 'Running') {
     const combined = buildRunningPreviewFromSections(sections);
     if (combined) {
       return combined;
     }
   } else {
-    const assistant = latestSection(sections, new Set(['assistant', 'codex']));
+    const assistant = latestSection(sections, new Set(['assistant', 'codex', 'final_answer', 'text']));
     if (assistant) {
       return { marker: assistant.marker, content: normalizePreviewContent(trimSectionTailNoise(assistant.content)) };
+    }
+    const reasoning = latestSection(sections, new Set(['reasoning']));
+    if (reasoning) {
+      return { marker: 'assistant', content: normalizePreviewContent(trimSectionTailNoise(reasoning.content)) };
     }
     const exec = latestSection(sections, new Set(['exec']));
     if (exec) {

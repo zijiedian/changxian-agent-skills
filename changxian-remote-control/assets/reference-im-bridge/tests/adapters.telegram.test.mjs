@@ -120,7 +120,7 @@ test('compact final output edits the existing progress message', async () => {
   assert.equal(ctx.calls.length, 3);
   assert.equal(ctx.calls[0][0], 'draft');
   assert.equal(ctx.calls[1][0], 'draft');
-  assert.match(ctx.calls[1][1].text, /已完成/);
+  assert.equal(ctx.calls[1][1].text, '\u2060');
   assert.equal(ctx.calls[2][0], 'reply');
   assert.match(ctx.calls[2][1].html, /最终结果/);
 });
@@ -168,6 +168,106 @@ test('meaningful progress draft keeps only the latest non-assistant step', async
   assert.equal(ctx.calls[0][0], 'draft');
   assert.match(ctx.calls[0][1].text, /执行工具: read_file|检索资料: opencli/);
 }));
+
+test('tool pending status renders as natural Chinese in telegram draft', async () => {
+  const { ctx, sink } = createSinkHarness();
+
+  await sink.progress({
+    status: 'Running',
+    marker: 'exec',
+    text: 'tool · pending',
+    preview: {
+      phase: 'exec',
+      summary: 'tool · pending',
+      content: 'tool · pending',
+      highlights: [],
+      checks: [],
+      changedFiles: [],
+      notes: [],
+      diffBlocks: [],
+    },
+    elapsedSeconds: 0,
+  });
+
+  assert.equal(ctx.calls.length, 1);
+  assert.equal(ctx.calls[0][0], 'draft');
+  assert.equal(ctx.calls[0][1].text, '工具准备中');
+});
+
+test('tool in_progress status renders as natural Chinese in telegram draft', async () => {
+  const { ctx, sink } = createSinkHarness();
+
+  await sink.progress({
+    status: 'Running',
+    marker: 'exec',
+    text: 'tool · in_progress',
+    preview: {
+      phase: 'exec',
+      summary: 'tool · in_progress',
+      content: 'tool · in_progress',
+      highlights: [],
+      checks: [],
+      changedFiles: [],
+      notes: [],
+      diffBlocks: [],
+    },
+    elapsedSeconds: 0,
+  });
+
+  assert.equal(ctx.calls.length, 1);
+  assert.equal(ctx.calls[0][0], 'draft');
+  assert.equal(ctx.calls[0][1].text, '工具执行中');
+});
+
+test('tool completion status renders with concrete command title in telegram draft', async () => {
+  const { ctx, sink } = createSinkHarness();
+
+  await sink.progress({
+    status: 'Running',
+    marker: 'exec',
+    text: 'cat /tmp/demo.txt · completed',
+    preview: {
+      phase: 'exec',
+      summary: 'cat /tmp/demo.txt · completed',
+      content: 'cat /tmp/demo.txt · completed',
+      highlights: [],
+      checks: [],
+      changedFiles: [],
+      notes: [],
+      diffBlocks: [],
+    },
+    elapsedSeconds: 0,
+  });
+
+  assert.equal(ctx.calls.length, 1);
+  assert.equal(ctx.calls[0][0], 'draft');
+  assert.equal(ctx.calls[0][1].text, '执行完成: cat /tmp/demo.txt');
+});
+
+test('exec draft keeps multiline tool content instead of collapsing to summary', async () => {
+  const { ctx, sink } = createSinkHarness();
+
+  await sink.progress({
+    status: 'Running',
+    marker: 'exec',
+    text: 'read_file · in_progress',
+    preview: {
+      phase: 'exec',
+      summary: 'read_file · in_progress',
+      content: 'tool\nread_file\n/tmp/demo.txt\n执行中',
+      highlights: [],
+      checks: [],
+      changedFiles: [],
+      notes: [],
+      diffBlocks: [],
+    },
+    elapsedSeconds: 0,
+  });
+
+  assert.equal(ctx.calls.length, 1);
+  assert.equal(ctx.calls[0][0], 'draft');
+  assert.equal(ctx.calls[0][1].text, 'tool\nread_file\n/tmp/demo.txt\n执行中');
+});
 
 test('assistant chunk drafts accumulate inline before flush', async () => withMockedTime(async ({ advance }) => {
   const { ctx, sink } = createSinkHarness();
@@ -426,7 +526,7 @@ test('long-running final output sends the result, then deletes the thinking mess
   assert.equal(ctx.calls.length, 3);
   assert.deepEqual(ctx.calls.map(([type]) => type), ['draft', 'draft', 'reply']);
   assert.match(ctx.calls[0][1].text, /Thinking/);
-  assert.match(ctx.calls[1][1].text, /已完成/);
+  assert.equal(ctx.calls[1][1].text, '\u2060');
   assert.match(ctx.calls[2][1].html, /最终结果/);
 });
 
@@ -609,4 +709,25 @@ test('message update handling returns before long controller task settles', asyn
   } finally {
     Bot.prototype.start = originalStart;
   }
+});
+
+test('telegram sink progress prefers controller-rendered progress events over legacy payload rendering', async () => {
+  const { ctx, sink } = createSinkHarness();
+
+  await sink.progress({
+    status: 'Running',
+    marker: 'exec',
+    text: 'legacy fallback should not be used',
+    rendered: {
+      format: 'plain',
+      body: '💻 bash\nls -la\n执行中',
+    },
+    elapsedSeconds: 0,
+  });
+
+  assert.equal(ctx.calls.length, 1);
+  assert.equal(ctx.calls[0][0], 'draft');
+  assert.match(ctx.calls[0][1].text, /bash/);
+  assert.match(ctx.calls[0][1].text, /ls -la/);
+  assert.doesNotMatch(ctx.calls[0][1].text, /legacy fallback should not be used/);
 });
