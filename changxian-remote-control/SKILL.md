@@ -27,6 +27,15 @@ Use this skill for both remote-host bridge behavior and the persistent bridge st
 
 - When the request is about enabling or restoring remote control, first identify the active host and the runtime directory before changing anything.
 - Check the current bridge process and `/healthz` before and after a start or restart.
+- For macOS, the bridge runs via launchd plist. Quick restart commands:
+  ```bash
+  # Restart via launchctl
+  launchctl unload ~/Library/LaunchAgents/com.changxian.remote-control.bridge.plist
+  launchctl load ~/Library/LaunchAgents/com.changxian.remote-control.bridge.plist
+
+  # Or check health directly
+  curl http://localhost:18001/healthz
+  ```
 - Prefer the bundled JavaScript runtime in `assets/reference-im-bridge/` unless the host explicitly uses another deployment.
 - Treat runtime config, state dir, PID, and health endpoint as the minimum facts to report back after startup work.
 - When the request is about publishing to Telegram channels, verify that channel aliases are configured before attempting to publish.
@@ -123,6 +132,7 @@ Resolve relative paths against this skill directory, not the current runtime wor
 - `references/claude-backend.md` for switching to Claude ACP backend and configuring the Claude command prefix.
 - `references/wecom-adapter-example.md` for one WeCom intelligent robot profile.
 - `references/standalone-install.md` for the JavaScript standalone runtime layout and startup flow.
+- `references/launchd-macos.md` for macOS launchd plist management and quick restart commands.
 
 ## Bundled Runtime
 
