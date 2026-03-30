@@ -52,7 +52,18 @@ export function createMessageTransformer(tunnelService) {
 // ============================================================================
 
 // 从 telegram-renderer 重新导出
-export { markdownToTelegramHtml, coerceTelegramHtml } from './telegram-renderer.mjs';
+export { markdownToTelegramHtml, coerceTelegramHtml, renderTelegramPayload } from './telegram-renderer.mjs';
+
+// 从 wecom-renderer 重新导出
+export { renderWeComPayload } from './wecom-renderer.mjs';
+
+// 从 utils 重新导出（保持兼容）
+export {
+  truncateText,
+  buildStructuredPreview,
+  buildPreviewSummaryMarkdown,
+  previewHasProgressDetails,
+} from '../utils/utils.mjs';
 
 // ============================================================================
 // 常量导出
