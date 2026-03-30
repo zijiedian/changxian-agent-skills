@@ -1,5 +1,5 @@
 import { InputFile } from 'grammy';
-import { renderTelegramPayload } from '../../render/telegram.mjs';
+import { renderTelegramPayload } from '../../render/index.mjs';
 
 export function parseTelegramChannelTargets(raw) {
   const text = String(raw || '').trim();

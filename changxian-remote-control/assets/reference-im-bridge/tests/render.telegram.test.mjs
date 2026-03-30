@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import * as renderTelegram from '../src/render/telegram.mjs';
+import * as renderTelegram from '../src/render/index.mjs';
 
 test('render.telegram exports helper APIs consumed by the telegram adapter', () => {
   assert.equal(typeof renderTelegram.buildPreviewSummaryMarkdown, 'function');

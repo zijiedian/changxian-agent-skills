@@ -16,7 +16,7 @@ import {
   truncateText,
   coerceTelegramHtml,
   renderTelegramPayload,
-} from '../../render/telegram.mjs';
+} from '../../render/index.mjs';
 
 const TELEGRAM_EDIT_RETRY_DELAY_MS = 800;
 const TELEGRAM_PROGRESS_EDIT_INTERVAL_MS = 2000;
