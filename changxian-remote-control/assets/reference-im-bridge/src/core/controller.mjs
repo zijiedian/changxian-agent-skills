@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { execFileSync, spawn } from 'node:child_process';
 import { resolveCommand, helpLines } from '../commands/specs.mjs';
 import { applyAssistantOps } from '../commands/assistant-ops.mjs';
 import {
@@ -43,6 +45,133 @@ const CONTEXT_PREVIEW_MARKERS = ['[REMOTE HOST]', '[ACTIVE ROLE]', '[MEMORY CONT
 const PREFLIGHT_CACHE_TTL_MS = 5 * 60 * 1000;
 const TASK_STALE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes stale task cleanup
 const TASK_CLEANUP_INTERVAL_MS = 60 * 1000; // cleanup every 60 seconds
+
+/**
+ * 过滤 Pi 后端结果中的思考过程和 Extension/Skills 输出
+ */
+function stripThinkingAndExtensions(text, backend = '') {
+  let value = String(text || '').trim();
+  if (!value) return value;
+
+  // 过滤 <think>...</think> 标签内的思考内容
+  value = value.replace(/<think>[\s\S]*?<\/think>/gi, '');
+
+  // 过滤各种 thinking 标记行
+  const thinkingLines = ['thinking', 'thinking...', 'thought', 'thoughts', 'reasoning', '思考中', '思考'];
+  value = value
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim().toLowerCase();
+      return !thinkingLines.includes(trimmed);
+    })
+    .join('\n');
+
+  // 对于 Pi 后端，额外过滤 Extension 和 Skills 输出
+  if (backend === BACKEND_PI) {
+    const lines = value.split('\n');
+    value = lines.filter(line => {
+      const t = line.trim();
+      if (/^Extensions?\s*$/i.test(t)) return false;
+      if (/^Skills?\s*$/i.test(t)) return false;
+      if (/^[^\n]*(?:Extensions|Skills)[^\n]*$/i.test(t)) return false;
+      if (/^#{1,6}\s+[^\n]*(?:Extensions|Skills)/i.test(t)) return false;
+      if (/^[•\-\*]/.test(t)) return false;
+      if (/^(index\.ts|npm:[\w-]+)$/.test(t)) return false;
+      if (/^\s+(npm:[\w-]+|index\.ts)/.test(line)) return false;
+      return true;
+    }).join('\n');
+  }
+
+  value = value.replace(/\n{3,}/g, '\n\n').trim();
+  return value;
+}
+
+/**
+ * 使用 macOS say 命令生成语音文件
+ */
+async function generateSpeech(text, voice = '') {
+  return new Promise((resolve) => {
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      resolve(null);
+      return;
+    }
+
+    const maxLength = 300;
+    const truncated = text.length > maxLength ? text.slice(0, maxLength) : text;
+
+    const cleaned = truncated
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+      .replace(/```[\s\S]*?```/g, '')
+      .replace(/`[^`]+`/g, '')
+      .replace(/\[[^\]]+\]\([^)]+\)/g, '')
+      .replace(/[#*_~>\-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleaned || cleaned.length < 2) {
+      resolve(null);
+      return;
+    }
+
+    const tmpDir = os.tmpdir();
+    const aiffFile = path.join(tmpDir, `tts_${Date.now()}.aiff`);
+    const voiceName = voice || 'Tingting';
+
+    // 直接用命令行参数传递文本
+    const args = ['-v', voiceName, cleaned, '-o', aiffFile];
+    const proc = spawn('say', args);
+
+    proc.on('close', (code) => {
+      if (code === 0 && fs.existsSync(aiffFile)) {
+        const stats = fs.statSync(aiffFile);
+        console.info('[tts] generated aiff:', aiffFile, 'size:', stats.size);
+
+        if (stats.size < 1000) {
+          console.warn('[tts] aiff file too small');
+          try { fs.unlinkSync(aiffFile); } catch {}
+          resolve(null);
+          return;
+        }
+
+        // 转换为 OGG
+        const oggFile = aiffFile.replace('.aiff', '.ogg');
+        const ffmpegProc = spawn('ffmpeg', [
+          '-i', aiffFile,
+          '-y',
+          '-acodec', 'libopus',
+          '-vn',
+          '-ab', '32k',
+          '-ar', '16000',
+          oggFile
+        ]);
+
+        ffmpegProc.on('close', (oggCode) => {
+          try { fs.unlinkSync(aiffFile); } catch {}
+
+          if (oggCode === 0 && fs.existsSync(oggFile)) {
+            resolve(oggFile);
+          } else {
+            console.warn('[tts] ffmpeg convert failed');
+            resolve(null);
+          }
+        });
+
+        ffmpegProc.on('error', (err) => {
+          console.warn('[tts] ffmpeg error:', err.message);
+          resolve(null);
+        });
+      } else {
+        console.warn('[tts] say failed, code:', code);
+        resolve(null);
+      }
+    });
+
+    proc.on('error', (err) => {
+      console.warn('[tts] spawn error:', err.message);
+      resolve(null);
+    });
+  });
+}
 
 function balanceMarkdownFences(text) {
   const value = String(text || '').trimEnd();
@@ -1477,6 +1606,12 @@ export class RuntimeController {
         config: this.config,
       });
       const finalOutput = [opsResult.output, ...opsResult.errors].filter(Boolean).join('\n\n').trim();
+
+      // Pi 后端过滤思考和 Extension/Skills
+      if (backend === BACKEND_PI) {
+        finalOutput = stripThinkingAndExtensions(finalOutput, backend);
+      }
+
       const previewInfo = extractStructuredPreview(finalOutput || opsResult.summaries.join('\n'), 'Done');
       const preview = previewInfo.content || finalOutput || opsResult.summaries.join('\n') || '(empty output)';
       if (opsResult.counts.role || opsResult.counts.memory || opsResult.counts.schedule) {
@@ -1491,6 +1626,24 @@ export class RuntimeController {
         preview: previewInfo,
         elapsedSeconds: (Date.now() - started) / 1000,
       });
+
+      // Pi 后端发送语音总结
+      if (backend === BACKEND_PI && preview && typeof sink.sendAudio === 'function') {
+        try {
+          const audioPath = await generateSpeech(preview);
+          if (audioPath) {
+            // 截断 caption 到 Telegram 限制 (1024 字符)
+            const caption = preview.length > 1024 ? preview.slice(0, 1021) + '...' : preview;
+            const result = await sink.sendAudio(audioPath, { caption });
+            if (!result.ok) {
+              console.warn('[runtime] sendAudio failed:', result.reason);
+            }
+          }
+        } catch (error) {
+          console.warn('[runtime] sendAudio error:', error?.message || error);
+        }
+      }
+
       return { success: true, summary: truncateText(preview, 240), cleanedOutput: preview, sessionId };
     } catch (error) {
       const message = error?.message || String(error);

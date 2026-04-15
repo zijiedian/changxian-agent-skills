@@ -225,6 +225,7 @@ export class SchedulerRuntime {
       const nowTs = Math.floor(Date.now() / 1000);
       const dueJobs = this.store.listDueJobs(nowTs, 20);
       for (const job of dueJobs) {
+        // 如果任务正在运行中（不管是执行中还是排队中），根据并发策略决定是否跳过
         if (this.runningJobs.has(job.id)) {
           if (String(job.concurrency_policy || 'skip') === 'skip') {
             const next = computeNextRun(job, nowTs);
@@ -244,6 +245,8 @@ export class SchedulerRuntime {
         }
 
         this.store.updateScheduleState({ jobId: job.id, nextRunAt: next.nextRunAt, enabled: next.enabled, lastRunAt: nowTs });
+        
+        // 为每个触发创建独立的 runId，支持多次触发排队
         const runId = this.store.createJobRun(job.id);
         const task = this.runJob(job, runId)
           .catch((error) => {

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import { COMMAND_SPECS } from '../../commands/specs.mjs';
 import {
@@ -1299,6 +1300,50 @@ export function createTelegramSink(ctx, rememberPagination, buildPaginationKeybo
         signal?.removeEventListener('abort', abortHandler);
       }
     },
+    async sendAudio(audioPath, options = {}) {
+      const targetChatId = ctx?.chat?.id;
+      if (!targetChatId || !audioPath) return { ok: false, reason: 'missing chatId or audioPath' };
+      if (!fs.existsSync(audioPath)) {
+        console.warn('[telegram] sendAudio: file not found', audioPath);
+        return { ok: false, reason: 'file not found' };
+      }
+      try {
+        // 发送为 Voice Message (OGG/Opus)
+        // caption 可选，语音消息会显示为 "🎤 <caption>"
+        const sendOptions = {};
+        if (options.caption) {
+          sendOptions.caption = options.caption;
+          sendOptions.parse_mode = 'HTML';
+        }
+        await ctx.replyWithVoice(new InputFile(audioPath), sendOptions);
+        console.info('[telegram] sendVoice success:', audioPath);
+        return { ok: true };
+      } catch (error) {
+        const errorText = error?.description || error?.message || String(error);
+        console.warn('[telegram] sendVoice failed:', errorText);
+        // 降级：尝试作为音频文件发送
+        try {
+          const fallbackOptions = {};
+          if (options.caption) {
+            fallbackOptions.caption = options.caption;
+            fallbackOptions.parse_mode = 'HTML';
+          }
+          await ctx.replyWithAudio(new InputFile(audioPath), fallbackOptions);
+          console.info('[telegram] sendVoice fallback to audio success:', audioPath);
+          return { ok: true, mode: 'audio_fallback' };
+        } catch (fallbackError) {
+          console.warn('[telegram] sendVoice fallback also failed:', fallbackError?.message || fallbackError);
+          return { ok: false, reason: errorText };
+        }
+      } finally {
+        // 清理临时音频文件
+        try {
+          if (audioPath.includes('/tmp/tts_')) {
+            fs.unlinkSync(audioPath);
+          }
+        } catch {}
+      }
+    },
   };
 }
 
@@ -1499,6 +1544,49 @@ export function createTelegramPushSink(bot, binding, rememberPagination, buildPa
         );
       }
       await sendImages(rendered.images);
+    },
+    async sendAudio(audioPath, options = {}) {
+      if (!chatId || !audioPath) return { ok: false, reason: 'missing chatId or audioPath' };
+      if (!fs.existsSync(audioPath)) {
+        console.warn('[telegram] sendAudio: file not found', audioPath);
+        return { ok: false, reason: 'file not found' };
+      }
+      try {
+        // 发送为 Voice Message (OGG/Opus)
+        // caption 可选，语音消息会显示为 "🎤 <caption>"
+        const sendOptions = {};
+        if (options.caption) {
+          sendOptions.caption = options.caption;
+          sendOptions.parse_mode = 'HTML';
+        }
+        await bot.api.sendVoice(chatId, new InputFile(audioPath), sendOptions);
+        console.info('[telegram] sendVoice success:', audioPath);
+        return { ok: true };
+      } catch (error) {
+        const errorText = error?.description || error?.message || String(error);
+        console.warn('[telegram] sendVoice failed:', errorText);
+        // 降级：尝试作为音频文件发送
+        try {
+          const fallbackOptions = {};
+          if (options.caption) {
+            fallbackOptions.caption = options.caption;
+            fallbackOptions.parse_mode = 'HTML';
+          }
+          await bot.api.sendAudio(chatId, new InputFile(audioPath), fallbackOptions);
+          console.info('[telegram] sendVoice fallback to audio success:', audioPath);
+          return { ok: true, mode: 'audio_fallback' };
+        } catch (fallbackError) {
+          console.warn('[telegram] sendVoice fallback also failed:', fallbackError?.message || fallbackError);
+          return { ok: false, reason: errorText };
+        }
+      } finally {
+        // 清理临时音频文件
+        try {
+          if (audioPath.includes('/tmp/tts_')) {
+            fs.unlinkSync(audioPath);
+          }
+        } catch {}
+      }
     },
   };
 }
