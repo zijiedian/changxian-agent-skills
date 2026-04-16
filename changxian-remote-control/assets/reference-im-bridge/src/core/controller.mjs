@@ -1627,22 +1627,22 @@ export class RuntimeController {
         elapsedSeconds: (Date.now() - started) / 1000,
       });
 
-      // Pi 后端发送语音总结
-      if (backend === BACKEND_PI && preview && typeof sink.sendAudio === 'function') {
-        try {
-          const audioPath = await generateSpeech(preview);
-          if (audioPath) {
-            // 截断 caption 到 Telegram 限制 (1024 字符)
-            const caption = preview.length > 1024 ? preview.slice(0, 1021) + '...' : preview;
-            const result = await sink.sendAudio(audioPath, { caption });
-            if (!result.ok) {
-              console.warn('[runtime] sendAudio failed:', result.reason);
-            }
-          }
-        } catch (error) {
-          console.warn('[runtime] sendAudio error:', error?.message || error);
-        }
-      }
+      // [disabled] Pi 后端发送语音总结
+      // if (backend === BACKEND_PI && preview && typeof sink.sendAudio === 'function') {
+      //   try {
+      //     const audioPath = await generateSpeech(preview);
+      //     if (audioPath) {
+      //       // 截断 caption 到 Telegram 限制 (1024 字符)
+      //       const caption = preview.length > 1024 ? preview.slice(0, 1021) + '...' : preview;
+      //       const result = await sink.sendAudio(audioPath, { caption });
+      //       if (!result.ok) {
+      //         console.warn('[runtime] sendAudio failed:', result.reason);
+      //       }
+      //     }
+      //   } catch (error) {
+      //     console.warn('[runtime] sendAudio error:', error?.message || error);
+      //   }
+      // }
 
       return { success: true, summary: truncateText(preview, 240), cleanedOutput: preview, sessionId };
     } catch (error) {
