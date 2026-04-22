@@ -279,6 +279,36 @@ test('runTask rejects legacy non-ACP codex prefixes', async () => {
   assert.match(result.errorText || '', /Legacy codex command prefixes are no longer supported/);
 });
 
+test('runTask allows Pi final-output sanitization without throwing', async () => {
+  const controller = createController();
+  controller.backendProvider = () => ({
+    async runTask() {
+      return {
+        output: '## Skills\n- /Users/test/.pi/agent/skills/demo/SKILL.md\n\n你好，世界',
+        sessionId: '',
+      };
+    },
+  });
+  const sink = createSink();
+
+  const result = await controller.runTask({
+    host: 'telegram',
+    chatId: 'chat-1',
+    externalChatId: 'chat-1',
+    externalUserId: 'user-1',
+    text: 'say hi',
+  }, sink, {
+    hostName: 'telegram',
+    taskHost: 'telegram',
+    commandPrefix: 'pi-acp',
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.errorText, undefined);
+  assert.equal(sink.finalCalls.length, 1);
+  assert.equal(sink.finalCalls[0]?.text, '你好，世界');
+});
+
 test('runTask forwards rendered progress events without crashing the task', async () => {
   const controller = createController();
   controller.backendProvider = () => ({

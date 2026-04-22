@@ -1605,7 +1605,7 @@ export class RuntimeController {
         scheduler: this.scheduler,
         config: this.config,
       });
-      const finalOutput = [opsResult.output, ...opsResult.errors].filter(Boolean).join('\n\n').trim();
+      let finalOutput = [opsResult.output, ...opsResult.errors].filter(Boolean).join('\n\n').trim();
 
       // Pi 后端过滤思考和 Extension/Skills
       if (backend === BACKEND_PI) {
